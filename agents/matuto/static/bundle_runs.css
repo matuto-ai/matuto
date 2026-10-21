@@ -1,0 +1,4 @@
+#bundle-runs-start label{display:grid;gap:.25rem;margin:.7rem 0;max-width:36rem}
+#bundle-runs-start select{box-sizing:border-box;width:100%;min-width:0;max-width:100%;min-height:44px;padding:.45rem;font:inherit}
+.bundle-runs article{overflow-wrap:anywhere}
+.bundle-runs li{overflow-wrap:anywhere}

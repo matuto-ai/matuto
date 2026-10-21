@@ -1,0 +1,13 @@
+#!/bin/bash
+# Unknown comparisons run the full suite; only direct WQ entrypoint edits qualify.
+set -euo pipefail
+base="${1:-}"
+[[ "$base" =~ ^[0-9a-f]{40}$ ]] || exit 1
+changes="$(git diff --name-only --no-renames "$base" HEAD --)" || exit 1
+[[ -n "$changes" ]] || exit 1
+while IFS= read -r path; do
+    case "$path" in
+        wq.py|wq.sh) git cat-file -e "HEAD:$path" || exit 1 ;;
+        *) exit 1 ;;
+    esac
+done <<< "$changes"

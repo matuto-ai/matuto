@@ -1,0 +1,1023 @@
+#!/usr/bin/env python3
+"""One-off conversion from the checkout install to the operator app.
+
+This script is not part of the permanent bootstrap, the `agents/matuto/` package
+or any release file; it is deleted after the operator's cutover, beside
+`cutover/matuto-cutover`. It reads the old layout as data and changes none of it:
+
+* `profiles/`, `speech-profiles/`, `bundles/` and `defaults.sh` are parsed as
+  plain text. Nothing is sourced, evaluated or executed, and a file holding
+  anything but a plain variable or array assignment is refused naming the file
+  and line while every other file still converts.
+* One import document in the store's format is emitted from the profiles, the
+  bundles and the card and speech executables the operator names, so a new
+  language profile or bundle arrives as an unpublished candidate. No
+  qualification state, alias publication or build provenance is carried.
+* Every old value that is not carried is listed by file and name in the report
+  with the reason it was not, and nothing is invented for a value the old file
+  does not state.
+* The old results directories and the privately archived run records are
+  imported once as legacy runs through the store module, in one transaction each
+  and with no fingerprint: browsable and downloadable, never citable.
+
+The document is imported before the legacy runs, because the store refuses a new
+record whose stable ID retained run evidence already holds.
+"""
+
+import argparse
+import contextlib
+import datetime
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import sys
+from pathlib import Path
+
+AGENTS = Path(__file__).resolve().parent.parent / "agents"
+if str(AGENTS) not in sys.path:
+    sys.path.insert(0, str(AGENTS))
+
+from matuto import runner, store  # noqa: E402
+from matuto_runtime import OPTION_ALIASES, _VALUE_CANONICALS  # noqa: E402
+
+LEGACY_PROCEDURE = "legacy"
+LEGACY_PROCEDURE_REVISION = "checkout-install"
+CONFIG_ROOT_NAME = "ai-agents-sandbox"
+RECORD_SUFFIX = ".summary.json"
+
+# The old install's own reasoning default, from its lab command's
+# `<profile> metadata` output. A profile that states THINKING_CAPABILITIES carries its
+# own value; a profile that states none carries this one, because a language
+# profile's thinking is required, and the report says which it got.
+OLD_THINKING_DEFAULT = json.dumps(
+    {"reasoning": True,
+     "thinkingLevelMap": {"off": "off", "minimal": None, "low": None, "high": "high",
+                          "xhigh": None, "max": None},
+     "compat": {"thinkingFormat": "chat-template",
+                "chatTemplateKwargs": {"enable_thinking": {"$var": "thinking.enabled"}},
+                "supportsDeveloperRole": False}},
+    separators=(",", ":"))
+
+LANGUAGE_REPORTED = {
+    "MODEL_PATH": "a host path is never carried; import names files through acquisition records",
+    "MODEL_MANIFEST_PATH": "a host path is never carried; import names files through acquisition records",
+    "MODEL_MANIFEST_SHA256": "belongs to the vLLM manifest, which the new app does not read",
+    "BACKEND": "the old runtime selection is not carried over (CUT-4)",
+    "BACKEND_VERSION": "the llama.cpp build the old run used is not carried, and a run on "
+                       "another build only warns",
+    "MODEL_FORMAT": "the new model records name GGUF files through acquisition records",
+    "VLLM_BIN": "a vLLM catalogue profile has no kind in the new app",
+    "VLLM_ARGS": "a vLLM catalogue profile has no kind in the new app",
+    "SERVER_HOST": "the manager owns its own loopback address",
+    "SERVER_PORT": "the lab port is a store setting, not a profile field",
+    "SMOKE_OUTPUT_TOKENS": "a smoke measurement size now belongs to the card in Settings",
+    "BENCH_PROMPT_TOKENS": "a bench measurement size now belongs to the card in Settings",
+    "BENCH_GENERATION_TOKENS": "a bench measurement size now belongs to the card in Settings",
+    "BENCH_REPETITIONS": "a bench measurement size now belongs to the card in Settings",
+    "BENCH_VRAM_LIMIT_MB": "the VRAM ceiling now belongs to the card in Settings",
+    "QUALIFICATION_STATE": "import carries no qualification; the profile arrives as a candidate",
+}
+SPEECH_REPORTED = {
+    "SPEECH_BIN": "the speech executable is a store record the operator names to this script",
+    "SPEECH_BACKEND": "the speech runtime is chosen from the installed executables in Runtime",
+    "SPEECH_PORT": "voice serving owns its own part addresses",
+    "SPEECH_QUALIFICATION_STATE": "import carries no qualification; the profile arrives as a "
+                                  "candidate",
+}
+BUNDLE_REPORTED = {
+    "BUNDLE_QUALIFICATION_STATE": "import carries no qualification; the bundle arrives as a "
+                                  "candidate",
+}
+# The fields each kind reads; every other assignment in an old file is listed in
+# the report rather than dropped.
+LANGUAGE_CARRIED = frozenset((
+    "DISPLAY_NAME", "MODEL_ALIAS", "MODEL_FILE", "MODEL_SHA256", "MODEL_SOURCE",
+    "MODEL_REVISION", "CONTEXT_SIZE", "GPU_LAYERS", "THINKING_CAPABILITIES",
+    "MMPROJ_FILE", "MMPROJ_SHA256", "MTP_ENABLED", "MTP_FILE", "MTP_SHA256",
+    "SERVER_OUTPUT_TOKENS", "SERVER_ARGS", "SMOKE_ARGS", "BENCH_ARGS"))
+SPEECH_CARRIED = frozenset((
+    "SPEECH_DISPLAY_NAME", "SPEECH_ROLE", "SPEECH_MODEL_PATH", "SPEECH_MODEL_SHA256",
+    "SPEECH_ARGS"))
+BUNDLE_CARRIED = frozenset((
+    "BUNDLE_DISPLAY_NAME", "BUNDLE_MODEL_PROFILE", "BUNDLE_SPEECH_PROFILES",
+    "BUNDLE_LOAD_TOKENS", "BUNDLE_LOAD_PROMPT"))
+# The old host defaults: every one of them now belongs to the card or to Settings.
+DEFAULT_FIELDS_REASON = {
+    "GPU_LAYERS": "the default GPU layers now belong to the card in Settings › Cards",
+    "BENCH_VRAM_LIMIT_MB": "the VRAM ceiling now belongs to the card in Settings › Cards",
+    "SMOKE_OUTPUT_TOKENS": "the smoke size now belongs to the card in Settings › Cards",
+    "BENCH_PROMPT_TOKENS": "the bench size now belongs to the card in Settings › Cards",
+    "BENCH_GENERATION_TOKENS": "the bench size now belongs to the card in Settings › Cards",
+    "BENCH_REPETITIONS": "the bench size now belongs to the card in Settings › Cards",
+    "BACKEND": "the old runtime selection is not carried over (CUT-4)",
+    "MODEL_FORMAT": "the new model records name GGUF files through acquisition records",
+    "SERVER_HOST": "the manager owns its own loopback address",
+    "SERVER_PORT": "the lab port is a store setting, not a profile field",
+}
+MEDIA_TYPES = {".md": "text/markdown", ".json": "application/json", ".log": "text/plain",
+               ".txt": "text/plain", ".csv": "text/csv", ".jsonl": "application/x-ndjson",
+               ".patch": "text/x-diff", ".diff": "text/x-diff", ".toml": "application/toml",
+               ".yaml": "application/yaml", ".yml": "application/yaml"}
+IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+ASSIGNMENT = re.compile(r"\s*(?:declare\s+-a\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)")
+UNQUOTED_FORBIDDEN = "$`;|&<>()*?~{}"
+# Inside double quotes only an unescaped dollar or backtick expands or
+# substitutes; every other character, including `;&|<>`, is literal. A backslash
+# escapes a dollar, a backtick, a double quote or itself, and is literal before
+# any other character, exactly as the shell reads it.
+QUOTED_FORBIDDEN = "$`"
+ESCAPES = {"\\": "\\", '"': '"', "$": "$", "`": "`"}
+# A run directory names its stamp compactly (20260921T185823Z) and a committed
+# run record names it with dashes (2026-09-21T185823Z); both are the same moment.
+STAMP = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})T(\d{2})(\d{2})(\d{2})Z")
+NUMERIC_OPERAND = re.compile(r"-\d+(?:\.\d+)?$")
+
+
+class Refusal(Exception):
+    """One old file this script will not read as data, naming its file and line."""
+
+
+class Report:
+    """Everything the conversion did, and every old value it did not carry."""
+
+    def __init__(self):
+        self.lines = []
+        self.converted = []
+        self.refused = []
+        self.imported = []
+        self.already = []
+        self.unlinked = []
+
+    def add(self, source, name, reason):
+        self.lines.append(f"{source}: {name} not carried: {reason}")
+
+    def note(self, text):
+        self.lines.append(text)
+
+    def text(self, layout):
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        sections = [f"Conversion report from cutover/matuto-convert, written at {stamp}",
+                    "", "Source layout:"]
+        sections += [f"  {key}: {value}" for key, value in layout] or ["  none given"]
+        sections += ["", f"Records converted: {len(self.converted)}"]
+        sections += [f"  {kind} {identifier}" for kind, identifier in self.converted]
+        sections += ["", f"Files refused ({len(self.refused)}):"]
+        sections += [f"  {item}" for item in self.refused] or ["  none"]
+        sections += ["", f"Old values not carried ({len(self.lines)}):"]
+        sections += [f"  {line}" for line in self.lines] or ["  none"]
+        sections += ["", f"Legacy runs imported ({len(self.imported)}):"]
+        sections += [f"  {item}" for item in self.imported] or ["  none"]
+        sections += ["", f"Legacy runs already present, nothing written ({len(self.already)}):"]
+        sections += [f"  {item}" for item in self.already] or ["  none"]
+        sections += ["", f"Legacy runs stored without a record ({len(self.unlinked)}):"]
+        sections += [f"  {item}" for item in self.unlinked] or ["  none"]
+        return "\n".join(sections) + "\n"
+
+
+# --- Reading an old profile file as text -------------------------------------
+
+
+def read_text(path):
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise Refusal(f"{path}: {error}") from None
+
+
+def word(text, path, number):
+    """One plain value, refusing anything that is not literal text."""
+    value = text.strip()
+    if not value:
+        return ""
+    if value[0] in "\"'":
+        quote, inner, index = value[0], [], 1
+        while index < len(value):
+            character = value[index]
+            if quote == '"' and character == "\\":
+                if index + 1 >= len(value):
+                    raise Refusal(f"{path}:{number}: a backslash at the end of a value")
+                escape = value[index + 1]
+                if escape in ESCAPES:
+                    inner.append(ESCAPES[escape])
+                else:
+                    inner.append(character)
+                    inner.append(escape)
+                index += 2
+                continue
+            if character == quote:
+                break
+            if quote == '"' and character in QUOTED_FORBIDDEN:
+                raise Refusal(f"{path}:{number}: {character!r} would expand or substitute when "
+                              "the file runs, so the value is not plain data")
+            inner.append(character)
+            index += 1
+        if index != len(value) - 1:
+            raise Refusal(f"{path}:{number}: an unclosed {quote} quote")
+        return "".join(inner)
+    if any(character in UNQUOTED_FORBIDDEN or character.isspace() for character in value):
+        raise Refusal(f"{path}:{number}: the unquoted value {value!r} is not a plain assignment")
+    return value
+
+
+def array_elements(collected, path, number):
+    """One `(...)` array, read as words under the old file's own quoting.
+
+    A comment ends at its newline, so a later element is still read and its note
+    is kept. Every element is judged at the line it is on.
+    """
+    text = "\n".join(collected).strip()
+    if text.endswith(")"):
+        text = text[1:-1]
+    elements, notes, index, line = [], [], 0, number
+    while index < len(text):
+        character = text[index]
+        if character == "\n":
+            line += 1
+            index += 1
+            continue
+        if character.isspace():
+            index += 1
+            continue
+        if character == "#":
+            end = text.find("\n", index)
+            end = len(text) if end == -1 else end
+            notes.append(text[index:end].rstrip())
+            index = end
+            continue
+        end = index
+        if character in "\"'":
+            end = index + 1
+            while end < len(text) and text[end] != character:
+                end += 2 if character == '"' and text[end] == "\\" else 1
+            if end >= len(text):
+                raise Refusal(f"{path}:{line}: an unclosed {character} quote in an array")
+            end += 1
+        else:
+            while end < len(text) and not text[end].isspace():
+                end += 1
+        elements.append(word(text[index:end], path, line))
+        index = end
+    return elements, notes
+
+
+def parse(path):
+    """The old file's assignments and comment notes, or a Refusal naming a line.
+
+    Only a plain variable assignment, an array assignment or a comment is read.
+    A function, a conditional, a `source`, an expansion or a command substitution
+    is refused at the line it is on, and no part of the file has run.
+    """
+    values, notes = {}, []
+    lines = read_text(path).splitlines()
+    index = 0
+    while index < len(lines):
+        number, line = index + 1, lines[index]
+        index += 1
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            notes.append(stripped)
+            continue
+        if stripped.endswith("\\"):
+            raise Refusal(f"{path}:{number}: a line continuation is not a plain assignment")
+        match = ASSIGNMENT.match(line)
+        if match is None or line[:match.start()].strip():
+            raise Refusal(f"{path}:{number}: {stripped!r} is not a plain variable or array "
+                          "assignment, a comment or a blank line")
+        name, rest = match.group(1), line[match.end():]
+        if not rest.startswith("("):
+            values[name] = word(rest, path, number)
+            continue
+        collected, started, depth = [rest], number, rest.count("(") - rest.count(")")
+        while depth and index < len(lines):
+            following = lines[index]
+            index += 1
+            depth += following.count("(") - following.count(")")
+            collected.append(following)
+        if depth:
+            raise Refusal(f"{path}:{started}: an array is never closed")
+        elements, array_notes = array_elements(collected, path, started)
+        values[name] = elements
+        notes.extend(array_notes)
+    return values, "\n".join(notes)
+
+
+def identifier_of(path):
+    name = path.name[:-3] if path.name.endswith(".sh") else path.name
+    if not IDENTIFIER.fullmatch(name):
+        raise Refusal(f"{path}: {name!r} is not a store record ID")
+    return name
+
+
+def report_unknown(values, known, report, source):
+    """Every assignment this conversion reads nothing of, listed rather than dropped."""
+    for name in sorted(values):
+        if name not in known:
+            report.add(source, name, "no old field this conversion reads, so it is listed "
+                       "rather than carried into any record")
+
+
+# --- Turning the old values into one import document -------------------------
+
+
+def takes_value(flag):
+    """Whether the runtime reads the next element as this flag's operand."""
+    spelling = flag.partition("=")[0]
+    return OPTION_ALIASES.get(spelling, spelling) in _VALUE_CANONICALS
+
+
+def is_option(element):
+    """The runtime's own view: a numeric dash token is data, not an option."""
+    return element.startswith("-") and not NUMERIC_OPERAND.fullmatch(element)
+
+
+def argument_rows(tool, argv, report, source, name):
+    """One old argument array as argv rows, the way the runtime reads argv.
+
+    An element is a switch unless the runtime reads the next element as its
+    operand, which keeps an operand that itself begins with `-` (--seed -1) with
+    its own flag. An element that is neither is reported rather than dropped.
+    """
+    rows, index = [], 0
+    while index < len(argv):
+        flag = argv[index]
+        if not is_option(flag):
+            report.add(source, f"{name}[{index}] {flag!r}", "an element that is not an option "
+                      "has no row in the new argument format, so it is listed rather than "
+                      "dropped")
+            index += 1
+            continue
+        value = None
+        if index + 1 < len(argv) and "=" not in flag and (
+                takes_value(flag) or not is_option(argv[index + 1])):
+            value = argv[index + 1]
+            index += 1
+        rows.append({"tool": tool, "option": flag, "value": value})
+        index += 1
+    return rows
+
+
+def whole_number(values, name, source):
+    value = values.get(name)
+    if value in (None, ""):
+        raise Refusal(f"{source}: {name} is required by the new record")
+    if not value.isdigit() or int(value) <= 0:
+        raise Refusal(f"{source}: {name} is {value!r}, not a positive whole number")
+    return int(value)
+
+
+class Resolver:
+    """Acquisition-record picks, matched on what the old file records.
+
+    Nothing is ever named by a path: a pick is resolved by file name and the
+    SHA-256 the old file states, narrowed by the source and revision it states
+    when it states them, and only a complete record is a match.
+    """
+
+    def __init__(self, connection, mapping):
+        self.connection = connection
+        self.mapping = mapping
+
+    def _complete(self, acquisition_id, file_name):
+        row = self.connection.execute(
+            "SELECT r.acquisition_id AS acquisition_id, f.file_name AS file_name,"
+            " f.computed_sha256 AS computed_sha256, r.repository AS repository,"
+            " r.revision AS revision"
+            " FROM acquisition_files f JOIN acquisition_records r"
+            " ON r.acquisition_id = f.acquisition_id"
+            " WHERE f.acquisition_id = ? AND f.file_name = ?"
+            " AND r.verified_at IS NOT NULL AND f.verified_at IS NOT NULL",
+            (acquisition_id, file_name)).fetchone()
+        return dict(row) if row else None
+
+    def resolve(self, profile_id, role, file_name, sha256, repository=None, revision=None):
+        named = (self.mapping.get(profile_id) or {}).get(role)
+        if named:
+            # --map only chooses between complete records that already agree with
+            # the identity the old file states; it never replaces that identity.
+            found = self._complete(named.get("acquisition_id"), named.get("file_name"))
+            if found is None:
+                raise Refusal(f"{profile_id}: the acquisition record named for its {role} does "
+                              f"not hold a complete file {named.get('file_name')!r}")
+            if named.get("file_name") != file_name:
+                raise Refusal(f"{profile_id}: the acquisition record named for its {role} holds "
+                              f"{named.get('file_name')!r}, not the recorded {file_name!r}")
+            if sha256 and found["computed_sha256"] != sha256:
+                raise Refusal(f"{profile_id}: the acquisition record named for its {role} holds "
+                              f"{file_name!r} at {found['computed_sha256']!r}, not the recorded "
+                              f"{sha256!r}")
+            if not self._agrees(found["acquisition_id"], repository, revision):
+                raise Refusal(f"{profile_id}: the acquisition record named for its {role} does "
+                              "not state the source and revision the old file records")
+            return found
+        rows = self.connection.execute(
+            "SELECT r.acquisition_id AS acquisition_id, f.file_name AS file_name"
+            " FROM acquisition_files f JOIN acquisition_records r"
+            " ON r.acquisition_id = f.acquisition_id"
+            " WHERE f.file_name = ? AND f.computed_sha256 = ?"
+            " AND r.verified_at IS NOT NULL AND f.verified_at IS NOT NULL",
+            (file_name, sha256 or "")).fetchall()
+        matching = [dict(row) for row in rows
+                    if self._agrees(row["acquisition_id"], repository, revision)]
+        if not matching:
+            return None
+        if len(matching) > 1:
+            raise Refusal(f"{profile_id}: {len(matching)} complete acquisition records hold "
+                          f"{file_name!r} at {sha256!r}; name one with --map")
+        return matching[0]
+
+    def _agrees(self, acquisition_id, repository, revision):
+        if repository in (None, "") and revision in (None, ""):
+            return True
+        row = self.connection.execute(
+            "SELECT repository, revision FROM acquisition_records WHERE acquisition_id = ?",
+            (acquisition_id,)).fetchone()
+        if row is None:
+            return False
+        return (repository in (None, "") or row["repository"] == repository) and \
+               (revision in (None, "") or row["revision"] == revision)
+
+
+def pick(values, source, role, file_name, sha256, report, resolve):
+    """One file pick, or None with the reason it could not be named."""
+    if file_name in (None, ""):
+        if sha256 not in (None, ""):
+            report.add(source, role, "the file's name is not stated, so nothing can be named "
+                      "through an acquisition record")
+        return None
+    found = resolve(file_name, sha256)
+    if found is None:
+        report.add(source, role, f"no complete acquisition record holds {file_name!r} at the "
+                  "recorded SHA-256, so the pick is left to Model files")
+        return None
+    return {"acquisition_id": found["acquisition_id"], "file_name": found["file_name"]}
+
+
+def language_record(path, values, notes, report, options, resolver):
+    source = str(path)
+    profile_id = identifier_of(path)
+    if values.get("BACKEND") == "vllm" or values.get("MODEL_FORMAT") in ("awq", "int4") \
+            or values.get("VLLM_BIN") or values.get("VLLM_ARGS"):
+        raise Refusal(f"{source}: a vLLM catalogue profile has no kind in the new app")
+    name = values.get("DISPLAY_NAME") or values.get("MODEL_ALIAS")
+    if not name:
+        raise Refusal(f"{source}: neither DISPLAY_NAME nor MODEL_ALIAS is stated, so there is "
+                      "no name to carry and none is invented")
+    if not values.get("DISPLAY_NAME"):
+        report.add(source, "DISPLAY_NAME", "a legacy profile states no display name, so the "
+                  "profile's own MODEL_ALIAS is carried as its name")
+    alias = values.get("MODEL_ALIAS")
+    if not alias:
+        raise Refusal(f"{source}: MODEL_ALIAS is required by a language profile")
+    thinking = values.get("THINKING_CAPABILITIES")
+    if not thinking:
+        thinking = OLD_THINKING_DEFAULT
+        report.add(source, "THINKING_CAPABILITIES", "the profile states none, so the old "
+                  "install's own reasoning default is carried because a language profile's "
+                  "thinking is required; change it if the operator wants another")
+    rows = []
+    if values.get("GPU_LAYERS"):
+        rows.append({"tool": "server", "option": store.GPU_LAYER_CANONICAL,
+                     "value": values["GPU_LAYERS"]})
+        report.add(source, "GPU_LAYERS", "carried as the profile's own --gpu-layers override "
+                  "rather than the card's default")
+    rows += argument_rows("server", values.get("SERVER_ARGS") or [], report, source, "SERVER_ARGS")
+    if values.get("SERVER_OUTPUT_TOKENS"):
+        rows.append({"tool": "server", "option": "--n-predict",
+                     "value": values["SERVER_OUTPUT_TOKENS"]})
+    rows += argument_rows("smoke", values.get("SMOKE_ARGS") or [], report, source, "SMOKE_ARGS")
+    rows += argument_rows("bench", values.get("BENCH_ARGS") or [], report, source, "BENCH_ARGS")
+
+    def source_revision():
+        return values.get("MODEL_SOURCE"), values.get("MODEL_REVISION")
+
+    model = pick(values, source, "model", values.get("MODEL_FILE"), values.get("MODEL_SHA256"),
+                 report, lambda name, digest: resolver.resolve(
+                     profile_id, "model", name, digest, *source_revision()))
+    if model is None:
+        raise Refusal(f"{source}: the model file has no complete acquisition record, so the "
+                      "profile cannot be imported")
+    record = {"kind": "language", "profile_id": profile_id, "name": name, "notes": notes,
+              "alias": alias, "context_size": whole_number(values, "CONTEXT_SIZE", source),
+              "thinking": thinking, "card_id": options.card, "arguments": rows, "model": model}
+    mmproj = pick(values, source, "mmproj", values.get("MMPROJ_FILE"),
+                  values.get("MMPROJ_SHA256"), report, lambda name, digest: resolver.resolve(
+                      profile_id, "mmproj", name, digest, *source_revision()))
+    if mmproj is not None:
+        record["mmproj"] = mmproj
+    if values.get("MTP_ENABLED") == "true" and values.get("MTP_FILE"):
+        mtp = pick(values, source, "mtp", values["MTP_FILE"], values.get("MTP_SHA256"), report,
+                   lambda name, digest: resolver.resolve(
+                       profile_id, "mtp", name, digest, *source_revision()))
+        if mtp is not None:
+            record["mtp"] = mtp
+    elif values.get("MTP_ENABLED") == "true":
+        report.add(source, "MTP_ENABLED", "the file enables the MTP head embedded in the main "
+                  "model, which the new model has no field for, so no MTP is carried")
+    elif values.get("MTP_FILE"):
+        report.add(source, "MTP_FILE", "the old lab requires MTP_ENABLED=true (the file states "
+                  f"{values.get('MTP_ENABLED')!r}), so no MTP head is carried")
+    for field, reason in LANGUAGE_REPORTED.items():
+        if values.get(field):
+            report.add(source, field, reason)
+    report_unknown(values, set(LANGUAGE_REPORTED) | LANGUAGE_CARRIED, report, source)
+    return record
+
+
+def speech_record(path, values, notes, report, options, resolver):
+    source = str(path)
+    profile_id = identifier_of(path)
+    role = values.get("SPEECH_ROLE")
+    if role not in ("synthesis", "recognition"):
+        raise Refusal(f"{source}: SPEECH_ROLE is {role!r}, not synthesis or recognition")
+    name = values.get("SPEECH_DISPLAY_NAME") or profile_id
+    if not values.get("SPEECH_DISPLAY_NAME"):
+        report.add(source, "SPEECH_DISPLAY_NAME", "the profile states none, so its own ID is "
+                  "carried as its name")
+    executable = options.synthesis_executable if role == "synthesis" \
+        else options.recognition_executable
+    if not executable:
+        raise Refusal(f"{source}: the {role} executable is a store record, so name it with "
+                      f"--{role}-executable")
+    weights_path = values.get("SPEECH_MODEL_PATH") or ""
+    weights = pick(values, source, "weights", os.path.basename(weights_path) or None,
+                   values.get("SPEECH_MODEL_SHA256"), report,
+                   lambda name, digest: resolver.resolve(profile_id, "weights", name, digest))
+    if weights is None:
+        raise Refusal(f"{source}: the weights have no complete acquisition record, so the "
+                      "speech profile cannot be imported")
+    record = {"kind": role, "profile_id": profile_id, "name": name, "notes": notes,
+              "speech_executable_id": executable, "weights": weights}
+    if role == "synthesis":
+        record["card_id"] = options.card
+    rows = argument_rows("server", values.get("SPEECH_ARGS") or [], report, source, "SPEECH_ARGS")
+    if rows:
+        record["arguments"] = rows
+    for field, reason in SPEECH_REPORTED.items():
+        if values.get(field):
+            report.add(source, field, reason)
+    report_unknown(values, set(SPEECH_REPORTED) | SPEECH_CARRIED, report, source)
+    return record
+
+
+def bundle_record(path, values, notes, report, speech_by_id):
+    source = str(path)
+    bundle_id = identifier_of(path)
+    members = {"language": values.get("BUNDLE_MODEL_PROFILE")}
+    for role in ("synthesis", "recognition"):
+        members[role] = next((identifier
+                              for identifier in values.get("BUNDLE_SPEECH_PROFILES") or []
+                              if (speech_by_id.get(identifier) or {}).get("kind") == role), None)
+        if members[role] is None:
+            raise Refusal(f"{source}: no converted {role} profile is named, and every bundle "
+                          "role is required")
+    record = {"kind": "bundle", "bundle_id": bundle_id,
+              "name": values.get("BUNDLE_DISPLAY_NAME") or bundle_id, "notes": notes,
+              "members": members}
+    load_tokens, load_prompt = values.get("BUNDLE_LOAD_TOKENS"), values.get("BUNDLE_LOAD_PROMPT")
+    if load_tokens:
+        record["load_tokens"] = whole_number(values, "BUNDLE_LOAD_TOKENS", source)
+    if load_prompt:
+        record["load_prompt"] = load_prompt
+    if not load_tokens or not load_prompt:
+        report.add(source, "BUNDLE_LOAD_TOKENS/BUNDLE_LOAD_PROMPT", "a bundle's stated "
+                  "generation load is optional and the file states only part of it, so nothing "
+                  "is invented for the rest")
+    for field, reason in BUNDLE_REPORTED.items():
+        if values.get(field):
+            report.add(source, field, reason)
+    report_unknown(values, set(BUNDLE_REPORTED) | BUNDLE_CARRIED, report, source)
+    return record
+
+
+def convert(directory, kind, report, options, resolver, speech_by_id=None):
+    """Every readable file in one old directory, in name order."""
+    records = []
+    if not directory or not directory.is_dir():
+        return records
+    for path in sorted(directory.iterdir()):
+        if not path.is_file():
+            report.add(str(path), path.name, "not a file, so nothing was read from it")
+            continue
+        if path.suffix != ".sh":
+            report.add(str(path), path.name, "not a .sh profile file, so nothing was read from it")
+            continue
+        try:
+            values, notes = parse(path)
+            if kind == "bundle":
+                record = bundle_record(path, values, notes, report, speech_by_id or {})
+            elif kind == "speech":
+                record = speech_record(path, values, notes, report, options, resolver)
+            else:
+                record = language_record(path, values, notes, report, options, resolver)
+        except Refusal as refusal:
+            report.refused.append(str(refusal))
+            continue
+        identifier = record.get("profile_id") or record.get("bundle_id")
+        report.converted.append((record["kind"], identifier))
+        if speech_by_id is not None and record["kind"] != "bundle":
+            speech_by_id[identifier] = record
+        records.append(record)
+    return records
+
+
+def convert_defaults(path, report):
+    """`defaults.sh` as data: every value it states now belongs to the card."""
+    if not path or not path.is_file():
+        return
+    try:
+        values, _notes = parse(path)
+    except Refusal as refusal:
+        report.refused.append(str(refusal))
+        return
+    for name, value in values.items():
+        reason = DEFAULT_FIELDS_REASON.get(
+            name, "a host default the new app does not read, so it is listed rather than "
+            "carried into any record")
+        report.add(str(path), name, f"{reason} (value {value!r})")
+
+
+# --- Old results and run records as legacy runs ------------------------------
+
+
+def artifact(path, name):
+    with path.open("rb") as handle:
+        body = handle.read(runner.EVIDENCE_LIMIT + 1)
+    truncated = len(body) > runner.EVIDENCE_LIMIT
+    body = body[:runner.EVIDENCE_LIMIT]
+    return (name, MEDIA_TYPES.get(path.suffix.lower(), mimetypes.guess_type(name)[0] or ""),
+            len(body), hashlib.sha256(body).hexdigest(), int(truncated), body)
+
+
+def observed_outcome(directory):
+    """The end the old record states, or None when it states none."""
+    try:
+        stated = json.loads((directory / "observation.json").read_text(encoding="utf-8"))["outcome"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"completed": "completed", "error": "errored"}.get(stated)
+
+
+def stamp_time(name):
+    match = STAMP.match(name or "")
+    if not match:
+        return None
+    year, month, day, hour, minute, second = (int(part) for part in match.groups())
+    return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}Z"
+
+
+def results_runs(root):
+    """Every run directory under the old results tree, with its record."""
+    found = []
+    if not root or not root.is_dir():
+        return found
+    for directory in sorted(path for path in root.rglob("*") if path.is_dir()):
+        parts = directory.relative_to(root).parts
+        # A depth-two directory is a language profile's own run directory, unless
+        # its first part is the reserved `speech` or `bundles` parent.
+        if len(parts) == 2 and parts[0] not in ("speech", "bundles"):
+            family, record_kind, record_id = "language", "language", parts[0]
+        elif len(parts) == 3 and parts[0] == "speech":
+            family, record_kind, record_id = "speech", "bundle", parts[1]
+        elif len(parts) == 3 and parts[0] == "bundles":
+            family, record_kind, record_id = "bundle", "bundle", parts[1]
+        else:
+            continue
+        found.append({"run_id": "/".join(parts), "directory": directory, "file": None,
+                      "family": family, "record_kind": record_kind, "record_id": record_id,
+                      "stamp": stamp_time(directory.name.split(".")[0]), "artifacts": []})
+    return found
+
+
+def evidence_records(root, report):
+    """Each run record under the evidence directory, with the files that belong to it.
+
+    A `.md` or `.json` file is a run record; every other file is evidence for the
+    run record with the longest name it starts with, so a server log beside its
+    bundle summary is held as that run's evidence rather than as a run of its own.
+    """
+    found = []
+    if not root or not root.is_dir():
+        return found
+    files = sorted((path for path in root.iterdir() if path.is_file()),
+                   key=lambda path: (0 if path.suffix == ".md" else 1, path.name))
+    for path in root.iterdir():
+        if path.is_dir():
+            report.add(str(path), path.name, "a directory, so nothing was read from it")
+    for path in files:
+        if path.suffix not in (".md", ".json"):
+            continue
+        run_id = path.name[:-len(path.suffix)]
+        if path.name.endswith(RECORD_SUFFIX):
+            run_id = path.name[:-len(RECORD_SUFFIX)]
+        if any(run["run_id"] == run_id for run in found):
+            continue
+        found.append({"run_id": run_id, "directory": None, "file": path, "family": "evidence",
+                      "record_kind": "language", "record_id": "", "stamp": stamp_time(run_id),
+                      "artifacts": []})
+    attached = {run["file"].name for run in found}
+    for path in files:
+        if path.name in attached:
+            continue
+        owner = next((run for run in found if path.name.startswith(run["run_id"] + ".")), None)
+        if owner is None:
+            report.add(str(path), path.name, "no run record's name holds this file, so it is "
+                      "listed rather than imported")
+            continue
+        owner["artifacts"].append(path)
+    return found
+
+
+def import_run(opened, run, record, label, report):
+    """One legacy run, written in one transaction and never twice."""
+    connection = opened.connection()
+    if connection.execute("SELECT 1 FROM runs WHERE run_id = ?", (run["run_id"],)).fetchone():
+        report.already.append(run["run_id"])
+        return
+    source = run["file"] or run["directory"]
+    artifacts = [artifact(path, str(path.relative_to(run["directory"])))
+                 for path in sorted(path for path in run["directory"].rglob("*") if path.is_file())
+                 ] if run["directory"] is not None else [artifact(source, source.name)]
+    artifacts += [artifact(path, path.name) for path in run["artifacts"]]
+    when = run["stamp"] or datetime.datetime.fromtimestamp(
+        source.stat().st_mtime, datetime.timezone.utc).isoformat(timespec="seconds")
+    outcome = observed_outcome(run["directory"]) if run["directory"] is not None else None
+    summary = (f"Legacy {run['family']} record imported from {source} by "
+               "cutover/matuto-convert. The old install recorded no fingerprint, so "
+               "this run can never be cited, and it stores no qualification.")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            "INSERT INTO runs (run_id, record_kind, record_id, record_label, fingerprint,"
+            " build_id, procedure, procedure_revision, unit_name, outcome, dirty_checkout,"
+            " started_at) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, 0, ?)",
+            (run["run_id"], record[0] if record else "language",
+             record[1] if record else "", label, LEGACY_PROCEDURE, LEGACY_PROCEDURE_REVISION,
+             when))
+        store.write_run_evidence(connection, run["run_id"],
+                                 outcome=outcome or "interrupted", ended_at=when, summary=summary,
+                                 log="", log_truncated=False, checks=[], artifacts=artifacts)
+        connection.execute("COMMIT")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            connection.execute("ROLLBACK")
+        raise
+    report.imported.append(run["run_id"])
+    if record is None:
+        report.unlinked.append(run["run_id"])
+
+
+# --- The conversion ----------------------------------------------------------
+
+
+def default_layout():
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    lab = config / CONFIG_ROOT_NAME / "cortex-lab"
+    return {"profiles": lab / "profiles", "speech_profiles": lab / "speech-profiles",
+            "bundles": lab / "bundles", "defaults": lab / "defaults.sh",
+            "results": state / CONFIG_ROOT_NAME / "cortex-lab" / "results"}
+
+
+def protected_identities(options):
+    """(device, inode) of every file the conversion reads or must leave alone.
+
+    A hard link is a second name for the same file, and `resolve()` compares
+    names, so the identity of an existing destination is what says whether it is
+    an old input or a repository file.
+    """
+    repository = Path(__file__).resolve().parent.parent
+    identities = set()
+    for root in (options.profiles, options.speech_profiles, options.bundles, options.results,
+                 options.evidence, repository):
+        if not root:
+            continue
+        if root.is_dir():
+            walk = os.walk(root)
+        else:
+            walk = ((str(root.parent), [], [root.name]),)
+        for parent, directories, names in walk:
+            if Path(parent) == repository:
+                directories[:] = [name for name in directories if name != ".git"]
+            for name in names:
+                try:
+                    info = (Path(parent) / name).stat()
+                except OSError:
+                    continue
+                identities.add((info.st_dev, info.st_ino))
+    for single in (options.defaults, options.mapping):
+        if single:
+            try:
+                info = single.stat()
+            except OSError:
+                continue
+            identities.add((info.st_dev, info.st_ino))
+    return identities
+
+
+def parse_arguments(argv):
+    layout = default_layout()
+    parser = argparse.ArgumentParser(
+        prog="matuto-convert",
+        description="One-off conversion from the checkout install to the operator app. "
+                    "Reads the old layout as data and changes none of it.")
+    parser.add_argument("--profiles", type=Path, default=layout["profiles"],
+                        help="the old profile directory (default: %(default)s)")
+    parser.add_argument("--speech-profiles", type=Path, default=layout["speech_profiles"],
+                        help="the old speech-profile directory (default: %(default)s)")
+    parser.add_argument("--bundles", type=Path, default=layout["bundles"],
+                        help="the old bundle directory (default: %(default)s)")
+    parser.add_argument("--defaults", type=Path, default=layout["defaults"],
+                        help="the old host defaults file (default: %(default)s)")
+    parser.add_argument("--results", type=Path, default=layout["results"],
+                        help="the old run results directory (default: %(default)s)")
+    parser.add_argument("--evidence", type=Path, default=None,
+                        help="the directory holding privately archived run records; "
+                             "no evidence record is imported without it")
+    parser.add_argument("--findings", action="append", default=[], metavar="NAME",
+                        help="an evidence file that is research rather than a run record; it "
+                             "stays in the repository and is named in the report")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="the import document to write, already imported by this script")
+    parser.add_argument("--report", type=Path, required=True, help="where the report is written")
+    parser.add_argument("--card", required=True,
+                        help="the card ID every converted language and synthesis profile points to")
+    parser.add_argument("--synthesis-executable", default=None,
+                        help="the installed synthesis executable ID named by the operator")
+    parser.add_argument("--recognition-executable", default=None,
+                        help="the installed recognition executable ID named by the operator")
+    parser.add_argument("--map", dest="mapping", type=Path, default=None,
+                        help="a JSON file picking between the complete acquisition records that "
+                             "match a file, as {profile: {role: {acquisition_id, file_name}}}; "
+                             "the pick must still match the identity the old file records")
+    parser.add_argument("--no-import", dest="import_runs", action="store_false",
+                        help="write the document and the report only, changing no store")
+    options = parser.parse_args(argv)
+    reads = (("--profiles", options.profiles), ("--speech-profiles", options.speech_profiles),
+             ("--bundles", options.bundles), ("--defaults", options.defaults),
+             ("--results", options.results), ("--evidence", options.evidence),
+             ("--map", options.mapping))
+    repository = Path(__file__).resolve().parent.parent
+    protected = protected_identities(options)
+    for name in ("out", "report"):
+        # resolve() follows a symlink, so an alias of a directory that is read is
+        # refused too. Nothing this script writes may land inside a file or
+        # directory it reads, or anywhere in the repository.
+        written = getattr(options, name).resolve()
+        if written.is_relative_to(repository):
+            parser.error(f"--{name} would write inside the repository, which is read and never "
+                         "changed")
+        for option, read in reads:
+            if read and written.is_relative_to(read.resolve()):
+                parser.error(f"--{name} would write inside {option} {read}, which is read and "
+                             "never changed")
+        if written.exists():
+            info = written.stat()
+            if (info.st_dev, info.st_ino) in protected:
+                parser.error(f"--{name} {written} is the same file as one this conversion reads "
+                             "or keeps, which is never changed")
+    return options
+
+
+def read_mapping(path):
+    if not path:
+        return {}
+    try:
+        mapping = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"matuto-convert: cannot read --map {path}: {error}") from None
+    for profile, roles in mapping.items():
+        for role, named in roles.items():
+            if not isinstance(named, dict) or set(named) != {"acquisition_id", "file_name"}:
+                raise SystemExit(f"matuto-convert: --map entry {profile}/{role} must name exactly "
+                                 "acquisition_id and file_name")
+    return mapping
+
+
+def stored_records(opened):
+    """Every stored record a run can name as (record_kind, identifier) -> (kind, id, name, alias).
+
+    Only language profiles and bundles: the runs table holds no other kind, so a
+    speech profile is never linked as a run's record.
+    """
+    records = {}
+    for row in opened.connection().execute(
+            "SELECT profile_id, kind, name, alias FROM model_profiles WHERE kind = 'language'"):
+        records[("profile", row["profile_id"])] = (row["kind"], row["profile_id"], row["name"],
+                                                   row["alias"])
+    for row in opened.connection().execute("SELECT bundle_id, name FROM bundles"):
+        records[("bundle", row["bundle_id"])] = ("bundle", row["bundle_id"], row["name"], "")
+    return records
+
+
+def key_of(run):
+    """The stored-record key one old run names."""
+    return ("bundle" if run["record_kind"] == "bundle" else "profile"), run["record_id"]
+
+
+def link_evidence(run, stamps):
+    """The record an evidence file measured: the one results run of its own stamp.
+
+    A stamp two records share names neither, so the run stays unlinked rather
+    than guessing. The record is never inferred from the file's own name.
+    """
+    owners = stamps.get(run["stamp"]) or set()
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def main(argv):
+    options = parse_arguments(argv)
+    report = Report()
+    opened = store.open_store()
+    try:
+        resolver = Resolver(opened.connection(), read_mapping(options.mapping))
+        speech_by_id = {}
+        records = convert(options.profiles, "language", report, options, resolver)
+        records += convert(options.speech_profiles, "speech", report, options, resolver,
+                           speech_by_id)
+        records += convert(options.bundles, "bundle", report, options, resolver, speech_by_id)
+        convert_defaults(options.defaults, report)
+        document = {"version": store.DOCUMENT_VERSION, "records": records}
+        options.out.parent.mkdir(parents=True, exist_ok=True)
+        options.out.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+        if options.import_runs:
+            imported = []
+            refused_document = False
+            if records:
+                try:
+                    imported = store.import_records(opened, document)
+                except store.RecordRefusal as refusal:
+                    # A record the store refuses must not lose the report, the
+                    # other records or the emitted document.
+                    refused_document = True
+                    report.refused.append(f"{options.out}: the store refused the document: "
+                                          f"{refusal}")
+            else:
+                report.note("no record converted, so no document was imported")
+            for result in imported:
+                report.note(f"imported {result['action']} {result['kind']} {result['id']}")
+                for warning in result["warnings"]:
+                    report.note(f"warning: {warning}")
+            stored = stored_records(opened)
+            if refused_document:
+                # A refused document means the store holds no profile for these
+                # runs, and a rerun cannot relink a run already stored without a
+                # record, so import them after the refusal is fixed instead.
+                report.note("the store refused the profile document, so no legacy run was "
+                            "imported; fix the refusal and convert again")
+                runs, evidence = [], []
+            else:
+                runs = results_runs(options.results)
+                evidence = list(evidence_records(options.evidence, report))
+            keys = {run["run_id"]: key_of(run) for run in runs}
+            stamps = {}
+            for run in runs:
+                key = keys[run["run_id"]]
+                if run["stamp"] and key in stored and stored[key][0] == run["record_kind"]:
+                    stamps.setdefault(run["stamp"], set()).add(key)
+            for run in runs:
+                key = keys[run["run_id"]]
+                record = stored[key] if key in stored and stored[key][0] == run["record_kind"] else None
+                if record is None and run["family"] == "speech":
+                    report.note(f"{run['run_id']}: the runs table has no speech record kind, so "
+                                "the run is stored without a record")
+                elif record is None:
+                    report.note(f"{run['run_id']}: no converted record of that ID exists, so the "
+                                "run is stored without one")
+                label = record[2] if record else run["run_id"]
+                import_run(opened, run, record, label, report)
+            findings = set(options.findings)
+            for run in evidence:
+                if run["file"].name in findings:
+                    report.note(f"{run['file'].name}: listed as research, so it stays in the "
+                                "private archive and is not imported")
+                    continue
+                record = link_evidence(run, stamps)
+                if record is None:
+                    report.note(f"{run['file'].name}: no converted record of the same ID exists, "
+                                "so the run is stored without one")
+                    record = None
+                else:
+                    record = stored[record]
+                label = record[2] if record else run["run_id"]
+                import_run(opened, run, record, label, report)
+    finally:
+        opened.close()
+    text = report.text([("profiles", options.profiles), ("speech profiles", options.speech_profiles),
+                        ("bundles", options.bundles), ("defaults", options.defaults),
+                        ("results", options.results), ("evidence", options.evidence or "not given"),
+                        ("card", options.card), ("synthesis executable", options.synthesis_executable),
+                        ("recognition executable", options.recognition_executable)])
+    options.report.parent.mkdir(parents=True, exist_ok=True)
+    options.report.write_text(text, encoding="utf-8")
+    print(text, end="")
+    print(f"Document: {options.out}\nReport: {options.report}")
+    return 1 if report.refused else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

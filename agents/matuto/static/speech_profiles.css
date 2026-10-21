@@ -1,0 +1,9 @@
+#speechProfiles label{display:grid;gap:.3rem;margin:.7rem 0}
+#speechProfiles label[hidden]{display:none}
+#speechProfiles input,#speechProfiles select,#speechProfiles textarea{box-sizing:border-box;width:100%;min-width:0;min-height:44px;padding:.5rem;border:1px solid var(--line);border-radius:.45rem;background:var(--panel);color:var(--matuto-text);font:inherit}
+#speechProfiles textarea{min-height:5rem}
+.speech-profile-record{padding:.8rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.speech-profile-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin:.7rem 0}
+.speech-profile-actions button,#speechProfileAddArgument{min-height:44px}
+.speech-argument-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:.5rem;margin:.5rem 0}
+#speechProfileError,#speechProfileExecutableHelp{margin:.7rem 0;color:var(--accent);overflow-wrap:anywhere}

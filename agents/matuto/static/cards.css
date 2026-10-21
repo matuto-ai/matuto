@@ -1,0 +1,4 @@
+#cards-form label{display:grid;gap:.3rem;margin:.7rem 0}
+#cards-form label[hidden]{display:none}
+#cards-form input,#cards-form select,#cards-form textarea{box-sizing:border-box;width:100%;min-width:0;min-height:44px;padding:.5rem;border:1px solid var(--line);border-radius:.45rem;background:var(--panel);color:var(--matuto-text);font:inherit}
+#cards-form textarea{min-height:5rem}

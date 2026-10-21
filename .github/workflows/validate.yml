@@ -11,17 +11,24 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
+  statuses: read
 
 jobs:
   validate:
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Record tested tree and runner
+        run: printf 'CI_RUNTIME_TREE %s %s ubuntu-24.04\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
 
       - name: Detect test applicability
         id: changes
@@ -61,11 +68,37 @@ jobs:
           fi
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
-      # Give every test-only setup/check step this condition, not the whole job.
-      - name: Placeholder validation
+      - name: Check validation prerequisites
         if: steps.changes.outputs.skip_tests != 'true'
-        run: echo 'Placeholder only. Replace this step with project checks before requiring validation for merge.'
+        run: |
+          command -v shellcheck
+          command -v node
+
+      - name: Validate changed files
+        id: validation
+        if: steps.changes.outputs.skip_tests != 'true'
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if ./agents/ci-docs-only "$CI_BASE_SHA"; then
+            echo 'PASS: documentation-only change; runtime validation is not applicable.'
+          elif ./agents/ci-wq-only "$CI_BASE_SHA"; then
+            echo 'PASS: WQ-only change; manager regression is not applicable.'
+            ./validate.sh --wq-only
+          else
+            ./validate.sh | tee "$RUNNER_TEMP/matuto-validation.log"
+            echo 'full=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check runtime growth against exact main baseline
+        if: github.event_name == 'pull_request' && steps.validation.outputs.full == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 -B agents/ci_runtime_budget.py check --base "$CI_BASE_SHA" --log "$RUNNER_TEMP/matuto-validation.log"
 
       - name: Report tests not applicable
         if: steps.changes.outputs.skip_tests == 'true'
-        run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; project checks are still placeholders until configured.'
+        run: |
+          echo 'PASS: documentation-only change; runtime validation is not applicable.'

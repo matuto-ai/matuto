@@ -1,0 +1,1 @@
+"""One page section per file; the file name is the section name. See README.md."""

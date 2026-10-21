@@ -1,0 +1,135 @@
+name: release
+
+# Started by hand. The build job never sees the signing key; the sign job reads
+# it only in the release environment, which admits main alone and waits for the
+# operator's approval. docs/RELEASING.md has the one-time GitHub setup.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, MAJOR.MINOR.PATCH, above every version already listed
+        required: true
+        type: string
+      notes:
+        description: Release notes, naming any database change and new prerequisite
+        required: true
+        type: string
+      prerequisites:
+        description: Prerequisite names, separated by spaces
+        required: false
+        default: ''
+        type: string
+      changes_database:
+        description: This release changes the database
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # Releases run only on GitHub.
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the release file and extend the published list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+          PREREQUISITES: ${{ inputs.prerequisites }}
+          CHANGES_DATABASE: ${{ inputs.changes_database }}
+        run: |
+          set -euf
+          mkdir out previous
+          arguments=(--version "$VERSION" --commit "$GITHUB_SHA" --notes "$NOTES"
+                     --output "out/matuto-$VERSION.release" --list-output out/release-list.json)
+          for name in $PREREQUISITES; do arguments+=(--prerequisite "$name"); done
+          if [ "$CHANGES_DATABASE" = true ]; then arguments+=(--changes-database); fi
+          published=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --json tagName --jq length)
+          if [ "$published" != 0 ]; then
+            gh release download --repo "$GITHUB_REPOSITORY" --dir previous \
+              --pattern release-list.json --pattern release-list.json.sig
+            arguments+=(--previous-list previous/release-list.json --trusted-key release-key.pub)
+          fi
+          python3 agents/matuto/release_build.py "${arguments[@]}"
+          { echo '```json'; cat out/release-list.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: out
+      - name: Sign the list
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+          RELEASE_KEY_PASSPHRASE: ${{ secrets.RELEASE_KEY_PASSPHRASE }}
+        run: |
+          set -eu
+          umask 077
+          key="$RUNNER_TEMP/release-key"
+          askpass="$RUNNER_TEMP/release-askpass"
+          trap 'rm -f "$key" "$askpass"' EXIT
+          # The key stays passphrase-protected on disk; ssh-keygen asks this script for the passphrase.
+          printf '%s\n' "$RELEASE_KEY" > "$key"
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          printf '%s\n' "$RELEASE_KEY_PASSPHRASE"
+          EOF
+          chmod 700 "$askpass"
+          SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force \
+            ssh-keygen -Y sign -f "$key" -n matuto-release out/release-list.json < /dev/null
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release-key" "$RUNNER_TEMP/release-askpass"
+      - name: Check the signed list against the committed key
+        run: |
+          python3 - <<'EOF'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "agents")
+          from matuto import releases
+          reading = releases.read_list(Path("out/release-list.json").read_bytes(),
+                                       Path("out/release-list.json.sig").read_bytes(),
+                                       Path("release-key.pub").read_bytes())
+          print(f"list {reading.release_list.number} verifies against release-key.pub")
+          EOF
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft \
+            --target "$GITHUB_SHA" --title "Matuto $VERSION" --notes "$NOTES" \
+            "out/matuto-$VERSION.release" out/release-list.json out/release-list.json.sig

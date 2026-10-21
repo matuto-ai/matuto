@@ -1,0 +1,7 @@
+#languageProfileList .language-profile-record-actions{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+#languageProfileList .language-profile-record-actions a{display:inline-flex;align-items:center;min-height:44px;padding:.5rem .6rem}
+#languageProfileList .language-profile-record-actions .reason{flex-basis:100%}
+.language-profile-action-status{margin:.5rem 0}
+form.language-profile-duplicate-form{display:grid;gap:.6rem;max-width:30rem}
+form.language-profile-duplicate-form label{display:grid;gap:.2rem;min-width:0}
+form.language-profile-duplicate-form input{box-sizing:border-box;width:100%;max-width:100%;min-width:0;min-height:44px;padding:.45rem;font:inherit}

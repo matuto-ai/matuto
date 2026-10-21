@@ -1,0 +1,6 @@
+#bundle-form label{display:grid;gap:.3rem;margin:.7rem 0}
+#bundle-form input,#bundle-form select,#bundle-form textarea{box-sizing:border-box;width:100%;min-width:0;min-height:44px;padding:.5rem;border:1px solid var(--line);border-radius:.45rem;background:var(--panel);color:var(--matuto-text);font:inherit}
+#bundle-form textarea{min-height:5rem}
+.bundle-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.8rem}
+.bundle-actions button{min-height:44px}
+#bundle-error{margin:.7rem 0;color:var(--accent);overflow-wrap:anywhere}

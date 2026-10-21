@@ -1,0 +1,1 @@
+"""One status provider per file; the file name is the provider name. See README.md."""

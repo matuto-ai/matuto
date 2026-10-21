@@ -1,0 +1,83 @@
+#!/bin/bash
+# The host lab. Every profile, bundle and speech part it runs comes from the
+# store through the store module; this script never sources a profile, reads a
+# defaults file or opens the store's file.
+set -euo pipefail
+
+fail() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: matuto-lab inspect /absolute/installation/directory
+       matuto-lab runtime [show|select /absolute/installation BACKEND PCI]
+       matuto-lab builds [list|register ID PATH [LABEL]|forget ID|use ID]
+       matuto-lab model-root
+       matuto-lab <profile> wq
+       matuto-lab --store spec KIND ID
+       matuto-lab --store run KIND ID ACTION
+EOF
+    exit 2
+}
+
+runtime_script="$(dirname "${BASH_SOURCE[0]}")/matuto_runtime.py"
+store_script="$(dirname "${BASH_SOURCE[0]}")/matuto/store_lab.py"
+
+# The store module's entry is the only way this script reaches a record. A run
+# started from the browser or the CLI arrives here with the store's own launch
+# spec; nothing below reads a profile file.
+if [[ $# -ge 1 && "$1" == --store ]]; then
+    shift
+    exec python3 -B "$store_script" "$@"
+fi
+
+if [[ $# -ge 1 && "$1" == "runtime" ]]; then
+    shift
+    exec python3 -B "$runtime_script" "$@"
+fi
+
+if [[ $# -eq 2 && "$1" == "inspect" ]]; then
+    exec python3 -B "$runtime_script" "$2"
+fi
+
+if [[ $# -ge 1 && "$1" == "builds" ]]; then
+    shift
+    exec python3 -B "$runtime_script" builds "$@"
+fi
+
+if [[ $# -eq 1 && "$1" == "model-root" ]]; then
+    exec python3 -B "$runtime_script" model-root
+fi
+
+if [[ "${MATUTO_LAB_STORE_BACKED:-}" == 1 && -n "${MATUTO_STORE_LAUNCH_RECORD:-}" && $# -eq 2 ]]; then
+    exec python3 -B "$store_script" member "$1" "$2"
+fi
+if [[ $# -eq 2 && "$2" == wq ]]; then
+    command -v matuto-manager >/dev/null 2>&1 || fail "the Matuto run command is unavailable"
+    exec matuto-manager run wq "$1"
+fi
+if [[ "${MATUTO_LAB_STORE_BACKED:-}" == 1 && $# -eq 2 ]]; then
+    exec python3 -B "$store_script" run language "$1" "$2"
+fi
+
+# Removed with the sourced profile format and the old subcommands. Each
+# one refuses and starts nothing, and names where the work lives now.
+case "${1:-}" in
+    speech)
+        fail "the lab has no speech commands: a speech part is judged only as a bundle member, so start a bundle run from Runs & jobs or with matuto-manager run bundle BUNDLE and accept that run in the browser"
+        ;;
+    bundle)
+        fail "the lab has no bundle commands: start a bundle run from Runs & jobs or with matuto-manager run bundle BUNDLE and accept that run in the browser"
+        ;;
+    list|defaults|preset|metadata)
+        fail "the lab reads stored records only: '$1' is removed, and there is no profile file or defaults file to read. A record's own values are in the store, shown in the browser, or read with matuto-lab --store spec KIND ID"
+        ;;
+esac
+
+if [[ $# -eq 2 ]]; then
+    fail "the lab runs stored records only: no profile file is read or sourced any more, and '$2' is not an action this script performs. Start the run from Runs & jobs, or with matuto-manager run ACTION RECORD"
+fi
+
+usage
