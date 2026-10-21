@@ -1,0 +1,12 @@
+.storage-artifacts,.storage-artifacts section,.storage-artifacts article{min-width:0;overflow-wrap:anywhere}
+.storage-artifacts section{margin:1rem 0}
+.storage-artifacts h4,.storage-artifacts h5{margin:.5rem 0}
+.storage-artifacts form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.5rem;align-items:end;margin:.8rem 0}
+.storage-artifacts label{grid-column:1/-1}
+.storage-artifacts input{box-sizing:border-box;width:100%;min-width:0;min-height:44px;padding:.55rem .7rem;border:1px solid var(--line);border-radius:.5rem;background:var(--panel);color:var(--matuto-text);font:inherit}
+.storage-artifacts article{padding:1rem;margin:.75rem 0}
+.storage-artifacts article p{margin:.35rem 0}
+.storage-artifacts ul{margin:.3rem 0;padding-left:1.25rem}
+#storage-message:empty{display:none}
+#storage-message:not(:empty){margin:.75rem 0;padding:.65rem .8rem;border-left:4px solid var(--accent);background:var(--panel2);overflow-wrap:anywhere}
+@media(max-width:32rem){.storage-artifacts form{grid-template-columns:1fr}.storage-artifacts label{grid-column:auto}}

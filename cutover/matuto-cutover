@@ -1,0 +1,276 @@
+#!/bin/bash
+# One-off cutover from the checkout install.
+#
+# This script is not part of the permanent bootstrap, the `agents/matuto/`
+# package or any release file; it is deleted after the operator's cutover.
+# It only ever removes the old manager, router, voice-router and
+# voice-part units, the five old commands in ~/.local/bin and the old menu
+# entry. Every old configuration and state file stays, and their paths are
+# printed on stdout, one file per line, for the operator to delete by hand
+# after the conversion and import.
+set -euo pipefail
+
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+refuse() { printf 'Refused: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*" >&2; }
+
+command -v systemctl >/dev/null 2>&1 || fail "systemctl is required; run this on the host that runs the old checkout install."
+command -v flock >/dev/null 2>&1 || fail "flock is required."
+
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+config_root="$config_home/ai-agents-sandbox"
+manager_dir="$config_root/cortex-manager"
+# The old runtime root deliberately ignores XDG_CONFIG_HOME (see
+# agents/matuto_runtime.py): a lab run under a temporary XDG root still holds
+# the account's real lease, so the lease check must look at the home path.
+runtime_dir="$HOME/.config/ai-agents-sandbox/cortex-runtime"
+lab_config="$config_root/cortex-lab"
+lab_state="$state_home/ai-agents-sandbox/cortex-lab"
+unit_dir="$config_home/systemd/user"
+desktop_dir="$data_home/applications"
+desktop_entry="$desktop_dir/cortex-manager.desktop"
+
+# The old install's unit and menu entry run this command; the new install's
+# unit and entries deliberately do not. That is the whole test
+# that tells the two installs apart.
+old_command="${OLD_MANAGER_INSTALLED:-$HOME/.local/bin/cortex-manager}"
+old_bin_dir="${old_command%/*}"
+old_commands=(
+    "$old_command"
+    "$old_bin_dir/cortex-lab"
+    "$old_bin_dir/cortex_runtime.py"
+    "$old_bin_dir/cortex_bench.py"
+    "$old_bin_dir/cortex_voice.py"
+)
+
+manager_unit="cortex-manager.service"
+router_unit="local-llama-router.service"
+voice_router_unit="cortex-voice-router.service"
+manager_unit_file="$unit_dir/$manager_unit"
+router_unit_file="$unit_dir/$router_unit"
+voice_router_unit_file="$unit_dir/$voice_router_unit"
+build_lock="$manager_dir/build-job.lock"
+runtime_lock="$runtime_dir/run.lock"
+
+# 0 when the unit is definitely not live, 1 when it is live or active-ish, and
+# 2 when systemctl could not answer. Only a definitive answer may let the
+# cutover continue: an unreadable status must refuse, not read as stopped.
+unit_activity() {
+    local unit="$1" state status=0
+    state="$(systemctl --user is-active "$unit" 2>/dev/null)" || status=$?
+    case "$state" in
+        active|activating|deactivating|reloading) return 1 ;;
+    esac
+    case "$status" in
+        0) return 1 ;;
+        3|4) return 0 ;;
+        *) return 2 ;;
+    esac
+}
+
+# Each check records the first problem in PROBLEM and returns 1; the caller
+# decides when to refuse, because the refusal that follows the manager stop has
+# to restore the manager first.
+quiet_unit() { # unit description stop-action
+    local unit="$1" description="$2" action="$3"
+    local activity=0
+    unit_activity "$unit" || activity=$?
+    case "$activity" in
+        1) PROBLEM="$description is running. In the old page choose $action, then run the cutover again."; return 1 ;;
+        2) PROBLEM="cannot tell whether $description is running: systemctl did not answer. Fix systemd access, then run the cutover again."; return 1 ;;
+    esac
+    return 0
+}
+
+# 0 when the lock is free, 1 when it is held, 2 when it cannot be read. Any
+# holder, shared or exclusive, fails an exclusive non-blocking flock. The probe
+# and its lock live in a subshell, so winning the lock releases it at once and
+# no refusal changes anything.
+lock_state() {
+    local path="$1"
+    [[ -e "$path" ]] || return 0
+    [[ -r "$path" ]] || return 2
+    if ( exec {fd}<"$path" && flock -n -x "$fd" ) 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+free_lock() { # path description wait
+    local path="$1" description="$2" wait="$3"
+    local state=0
+    lock_state "$path" || state=$?
+    case "$state" in
+        1) PROBLEM="$description. $wait"; return 1 ;;
+        2) PROBLEM="cannot tell whether $description: $path could not be read. Fix access, then run the cutover again."; return 1 ;;
+    esac
+    return 0
+}
+
+# 0 when every check passes, otherwise 1 with the first problem in PROBLEM.
+check_activity() {
+    local part
+    PROBLEM=""
+    quiet_unit "$router_unit" "old agentic serving" "Stop" || return 1
+    quiet_unit "$voice_router_unit" "old voice serving" "Stop voice" || return 1
+    while IFS= read -r part; do
+        [[ -n "$part" ]] || continue
+        quiet_unit "$part" "old voice serving ($part)" "Stop voice" || return 1
+    done < <(voice_part_unit_names)
+    free_lock "$build_lock" "an old build is in progress" "Wait for it to finish or fail, then run the cutover again." || return 1
+    free_lock "$runtime_lock" "an old lab run holds the runtime lease" "Wait for the run to finish, then run the cutover again." || return 1
+    return 0
+}
+
+declared_line() {
+    local path="$1" key="$2" line
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    line="$(sed -n "s/^${key}=//p" "$path" | head -n 1)"
+    [[ -n "$line" ]] || return 1
+    printf '%s\n' "$line"
+}
+
+# The old manager writes the executed program through quote_argument, which
+# always wraps it in double quotes and escapes backslashes and quotes. Compare
+# the complete quoted program, so a path holding a space is recognised too.
+quote_old_command() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+runs_old_command() {
+    local path="$1" key="${2:-ExecStart}" line expected
+    line="$(declared_line "$path" "$key")" || return 1
+    expected="$(quote_old_command "$old_command")"
+    [[ "$line" == "$expected "* || "$line" == "$expected" ]]
+}
+
+voice_part_units() {
+    [[ -d "$unit_dir" ]] || return 0
+    find "$unit_dir" -maxdepth 1 -type f -name 'cortex-voice-part-*.service' -print 2>/dev/null || true
+}
+
+voice_part_unit_names() {
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        basename "$path"
+    done < <(voice_part_units)
+}
+
+# --- Old install gate --------------------------------------------------------
+# The manager unit is deleted last, so a rerun that follows an interruption
+# still finds it and finishes the work.
+
+old_install=false
+if runs_old_command "$manager_unit_file"; then
+    old_install=true
+fi
+
+# The new install's unit and entry deliberately do not run the old command.
+# They, not an absent old unit, are what mark the router presets
+# as new-install files: a rerun that follows an interruption must still print
+# the old presets it left in place before any bootstrap replaces them.
+new_install=false
+if [[ -e "$manager_unit_file" ]] && ! runs_old_command "$manager_unit_file"; then
+    new_install=true
+fi
+if [[ -e "$desktop_entry" ]] && ! runs_old_command "$desktop_entry" Exec; then
+    new_install=true
+fi
+
+# --- Refusals: every check runs before anything changes ----------------------
+
+check_activity || refuse "$PROBLEM"
+
+if $old_install; then
+    manager_was_live=false
+    activity=0
+    unit_activity "$manager_unit" || activity=$?
+    case "$activity" in
+        1) manager_was_live=true ;;
+        2) refuse "cannot tell whether the old manager is running: systemctl did not answer. Fix systemd access, then run the cutover again." ;;
+    esac
+
+    note "Stopping the old manager."
+    systemctl --user stop "$manager_unit"
+
+    # The old page can start serving until the manager stops. Re-check after
+    # the stop, so a workload started in that window is refused instead of
+    # having its unit and commands deleted underneath it. The refusal keeps
+    # its promise to change nothing by restarting a manager it just stopped,
+    # so the page the message names is there to use.
+    if ! check_activity; then
+        if $manager_was_live && systemctl --user start "$manager_unit" 2>/dev/null; then
+            note "Restarted the old manager; open its page and choose Stop, then run the cutover again."
+        else
+            note "The old manager is stopped; run: systemctl --user start $manager_unit, open its page, choose Stop, then run the cutover again."
+        fi
+        refuse "$PROBLEM"
+    fi
+
+    note "Deleting the five old commands in $old_bin_dir."
+    for path in "${old_commands[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+            rm -f -- "$path"
+        fi
+    done
+fi
+
+# The old router, voice and part units and the old menu entry are recognised by
+# their own content, so a new install's units and entries are never touched.
+for path in "$router_unit_file" "$voice_router_unit_file"; do
+    if runs_old_command "$path"; then
+        rm -f -- "$path"
+    fi
+done
+while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    if runs_old_command "$path"; then
+        rm -f -- "$path"
+    fi
+done < <(voice_part_units)
+if runs_old_command "$desktop_entry" Exec; then
+    rm -f -- "$desktop_entry"
+fi
+if runs_old_command "$manager_unit_file"; then
+    rm -f -- "$manager_unit_file"
+fi
+
+# Unconditional and idempotent: a run killed between the last deletion and the
+# reload would otherwise leave systemd's in-memory definitions stale forever.
+systemctl --user daemon-reload
+
+# --- Every old file left in place -------------------------------------------
+# Files, never folders: the old folders also hold weights, builds and
+# new-install files. The router API key is reused by the new install; the login
+# and store belong to the new install; consumer exports are ai-agents-sandbox's,
+# not Matuto's (decision 0008). The router's presets are the old install's only
+# while the old manager unit still identifies the install as old, because the
+# new install generates them too.
+
+{
+    if [[ -d "$manager_dir" ]]; then
+        find "$manager_dir" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null || true
+    fi
+    if [[ -d "$runtime_dir" ]]; then
+        find "$runtime_dir" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null || true
+    fi
+    if [[ -d "$lab_config" ]]; then
+        find "$lab_config" -type f -print 2>/dev/null || true
+    fi
+    if [[ -d "$lab_state" ]]; then
+        find "$lab_state" -type f -print 2>/dev/null || true
+    fi
+} | while IFS= read -r path; do
+    case "$path" in
+        "$manager_dir/login.json"|"$manager_dir/store.sqlite3") continue ;;
+        "$manager_dir/presets.ini"|"$manager_dir/voice-presets.ini")
+            $new_install && continue ;;
+    esac
+    printf '%s\n' "$path"
+done | LC_ALL=C sort

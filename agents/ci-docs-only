@@ -1,0 +1,15 @@
+#!/bin/bash
+# Unknown comparisons run the full suite; never hide runtime deletions behind renames.
+set -euo pipefail
+base="${1:-}"
+head="${2:-HEAD}"
+[[ "$base" =~ ^[0-9a-f]{40}$ ]] || exit 1
+[[ "$head" == HEAD || "$head" =~ ^[0-9a-f]{40}$ ]] || exit 1
+changes="$(git diff --name-only --no-renames "$base" "$head" --)" || exit 1
+[[ -n "$changes" ]] || exit 1
+while IFS= read -r path; do
+    case "$path" in
+        README.md|CONTEXT.md|LICENSE|docs/*.md) ;;
+        *) exit 1 ;;
+    esac
+done <<< "$changes"

@@ -1,0 +1,1 @@
+"""One CLI command per file; the file name is the command name. See README.md."""
