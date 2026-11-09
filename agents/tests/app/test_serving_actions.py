@@ -261,7 +261,7 @@ class ServingActionsTest(unittest.TestCase):
                            " NULL, ?, ?)", (len(body), digest, NOW))
         connection.execute(
             "INSERT INTO model_profiles VALUES ('alpha', 'language', 'Alpha', 'alpha', 8192,"
-            " 'high', 'card-a', NULL, 1, '', ?)", (NOW,))
+            " '{\"mode\":\"none\"}', 'card-a', NULL, 1, '', ?)", (NOW,))
         connection.execute("INSERT INTO profile_artifacts VALUES ('alpha', 'model', 'acq',"
                            " 'model.gguf')")
         self.key = self.opened.path.parent.parent / "pi-local" / "api-key"
@@ -802,7 +802,7 @@ class ServingActionsTest(unittest.TestCase):
         connection.execute("INSERT INTO model_profiles (profile_id, kind, name, alias, context_size,"
                            " thinking, card_id, published, created_at)"
                            " VALUES ('unrelated', 'language', 'Unrelated', 'unrelated', 8192,"
-                           " 'high', 'card-a', 1, ?)", (NOW,))
+                           " '{\"mode\":\"none\"}', 'card-a', 1, ?)", (NOW,))
         connection.execute("INSERT INTO profile_arguments VALUES ('unrelated', 'server', 0, NULL,"
                            " '--unsupported-voice-probe', NULL)")
         with (mock.patch.object(matuto_runtime, "_landlock_confine"),

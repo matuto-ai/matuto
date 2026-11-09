@@ -86,7 +86,7 @@ class RemovalTest(unittest.TestCase):
             " VALUES ('exe-whisper', 'recognition', 'loc', '/models/whisper', 'abc', 'now');"
             "INSERT INTO model_profiles (profile_id, kind, name, alias, context_size, thinking,"
             " card_id, created_at) VALUES ('prof-coder', 'language', 'Language', 'language',"
-            " 2048, 'high', 'card-r9', 'now');"
+            " 2048, '{\"mode\":\"none\"}', 'card-r9', 'now');"
             "INSERT INTO model_profiles (profile_id, kind, name, card_id, speech_executable_id,"
             " created_at) VALUES ('prof-breeze', 'synthesis', 'Synthesis', 'card-r9', 'exe-breeze', 'now');"
             "INSERT INTO model_profiles (profile_id, kind, name, speech_executable_id, created_at)"

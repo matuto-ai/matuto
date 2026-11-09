@@ -98,7 +98,8 @@ def _list(opened):
             reason = reason or qualification["reason"]
         records.append({"profile_id": profile["profile_id"], "name": profile["name"],
                         "alias": profile["alias"], "published": profile["published"],
-                        "qualification": qualification, "available": available, "reason": reason})
+                        "qualification": qualification, "available": available, "reason": reason,
+                        "thinking_needed": profile["thinking"] is None})
     cards_list = [dict(row) for row in connection.execute(
         "SELECT card_id, name FROM cards ORDER BY name, card_id")]
     prerequisites = []

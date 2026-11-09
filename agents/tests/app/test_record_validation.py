@@ -127,7 +127,7 @@ class RecordTestCase(unittest.TestCase):
         self.connection.executescript(
             f"""
             INSERT INTO model_profiles VALUES ('prof-coder', 'language', 'Qwen3.6 Coder 192K',
-                'qwen3-coder', 131072, 'high', 'card-r9', NULL, 0, '', '{NOW}');
+                'qwen3-coder', 131072, '{{"mode":"none"}}', 'card-r9', NULL, 0, '', '{NOW}');
             INSERT INTO profile_artifacts VALUES ('prof-coder', 'model', 'acq-qwen36',
                 'Qwen3.6-35B-A3B-Q4_K_M.gguf');
             INSERT INTO profile_artifacts VALUES ('prof-coder', 'mmproj', 'acq-qwen36',
@@ -154,7 +154,7 @@ class RecordTestCase(unittest.TestCase):
     def language(self):
         return {"kind": "language", "profile_id": "prof-coder", "name": "Qwen3.6 Coder 192K",
                 "notes": "tuned for the router", "alias": "qwen3-coder", "context_size": 131072,
-                "thinking": "high", "card_id": "card-r9",
+                "thinking": {"mode": "none"}, "card_id": "card-r9",
                 "arguments": [{"tool": "server", "catalogue": "--parallel", "value": "1"},
                               {"tool": "bench", "catalogue": "--single-turn", "value": None}],
                 "model": {"acquisition_id": "acq-qwen36",
@@ -242,6 +242,28 @@ class FieldTest(RecordTestCase):
                 else:
                     record.pop(field)
                 self.assertRefused(record, label, field)
+
+    def test_thinking_accepts_the_fixed_format_and_refuses_anything_else(self):
+        toggle = {"mode": "toggle", "request": {"field": "chat_template_kwargs.enable_thinking",
+                                                "on": True, "off": False}}
+        levels = {"mode": "levels", "levels": ["low", "high"],
+                  "request": {"field": "reasoning_effort", "values": {"low": "low", "high": 4096}}}
+        for thinking in ({"mode": "none"}, toggle, levels):
+            with self.subTest(accepted=thinking["mode"]):
+                self.validate(dict(self.language(), thinking=thinking))
+        for thinking, field in (
+                ("high", "thinking"),
+                ({"mode": "auto"}, "thinking"),
+                ({"mode": "none", "request": {}}, "thinking"),
+                (dict(toggle, request={"field": "enable thinking", "on": True, "off": False}),
+                 "thinking.request.field"),
+                (dict(toggle, request={"field": "think", "on": True}), "thinking.request"),
+                (dict(toggle, request={"field": "think", "on": [True], "off": False}),
+                 "thinking.request.on"),
+                (dict(levels, levels=["low", "low"]), "thinking.levels"),
+                (dict(levels, levels=["low"]), "thinking.request.values")):
+            with self.subTest(refused=thinking):
+                self.assertRefused(dict(self.language(), thinking=thinking), "prof-coder", f"'{field}'")
 
     def test_a_field_another_kind_carries_is_refused_naming_it(self):
         recognition = self.recognition()

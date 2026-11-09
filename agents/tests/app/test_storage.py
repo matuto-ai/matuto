@@ -212,7 +212,7 @@ class LocationChangeTest(StorageTestCase):
             "INSERT INTO cards VALUES ('card', 'Card', 'gpu', 1024, -1, 1, 1, 1, 1, '', 'created')")
         self.connection.execute(
             "INSERT INTO model_profiles VALUES ('profile', 'language', 'Profile', 'profile',"
-            " 2048, 'high', 'card', NULL, 1, '', 'created')")
+            " 2048, '{\"mode\":\"none\"}', 'card', NULL, 1, '', 'created')")
         self.connection.execute(
             "INSERT INTO profile_artifacts VALUES ('profile', 'model', 'acq', 'model.gguf')")
         for kind, profile_id, executable_id, role in (

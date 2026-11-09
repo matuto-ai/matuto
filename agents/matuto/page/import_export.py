@@ -19,5 +19,8 @@ def html(_status):
 <div id="exportRecordList" role="group" aria-label="Records to export"></div>
 <button type="button" id="exportSelected">Download selected records as JSON file</button>
 <a href="/api/import-export?download=1">Download all records as JSON file</a>
+<h4>Model list for consumers</h4>
+<p>One JSON file listing the published language models with their limits, image input and thinking format, and no paths, addresses or keys. Copy it to each consumer yourself, and export again after publishing, unpublishing or editing a published profile.</p>
+<a href="/api/import-export?model_list=1">Export model list</a>
 <script src="/import-export.js" defer></script>
 </div>'''

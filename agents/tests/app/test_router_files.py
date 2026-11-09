@@ -76,7 +76,7 @@ class RouterFilesTest(unittest.TestCase):
                 ("adopted", "beta", "outside", "adopted.gguf", 1),
                 ("sharded", "gamma", "inside", "model-00001-of-00002.gguf", 1),
                 ("candidate", "hidden", "inside", "model.gguf", 0)):
-            c.execute("INSERT INTO model_profiles VALUES (?, 'language', ?, ?, 8192, 'high', 'card', NULL, ?, '', 'now')",
+            c.execute("INSERT INTO model_profiles VALUES (?, 'language', ?, ?, 8192, '{\"mode\":\"none\"}', 'card', NULL, ?, '', 'now')",
                       (profile, profile, alias, published))
             c.execute("INSERT INTO profile_arguments VALUES (?, 'server', 0, NULL, '--temp', '0.7')",
                       (profile,))

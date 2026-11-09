@@ -134,7 +134,7 @@ class VerificationTestCase(unittest.TestCase):
         """The profile the launch check reads its first model file and sidecars from."""
         self.connection.execute(
             "INSERT INTO model_profiles VALUES (?, 'language', 'Coder', 'coder', 131072,"
-            " 'high', NULL, NULL, 0, '', ?)", (profile_id, NOW))
+            " '{\"mode\":\"none\"}', NULL, NULL, 0, '', ?)", (profile_id, NOW))
         for role, name in (("model", SHARDS[0]), ("mmproj", SIDECAR)):
             self.connection.execute(
                 "INSERT INTO profile_artifacts VALUES (?, ?, ?, ?)",
@@ -151,7 +151,7 @@ class VerificationTestCase(unittest.TestCase):
 
     def language_document(self, acquisition_id):
         return {"kind": "language", "profile_id": "prof-x", "name": "x", "alias": "x",
-                "context_size": 131072, "thinking": "high", "card_id": "card-r9", "notes": "",
+                "context_size": 131072, "thinking": {"mode": "none"}, "card_id": "card-r9", "notes": "",
                 "arguments": [{"tool": "server", "catalogue": "--parallel", "value": "1"}],
                 "model": {"acquisition_id": acquisition_id, "file_name": SHARDS[0]}}
 

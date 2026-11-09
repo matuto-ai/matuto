@@ -84,7 +84,7 @@ class LanguageProfilesHttpTest(unittest.TestCase):
 
     def profile(self, profile_id="profile-new"):
         return {"kind": "language", "profile_id": profile_id, "name": "New profile",
-                "alias": "new-profile", "context_size": 4096, "thinking": "off",
+                "alias": "new-profile", "context_size": 4096, "thinking": {"mode": "none"},
                 "card_id": "card-a", "notes": "", "model": {
                     "acquisition_id": "acq-a", "file_name": "model.gguf"},
                 "mmproj": None, "mtp": None, "arguments": [
