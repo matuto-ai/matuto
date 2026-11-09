@@ -3606,6 +3606,8 @@ THINKING_FIELD_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-
 
 def _thinking(record, kind, label):
     thinking = record.get("thinking")
+    if thinking is None:
+        _refuse(kind, label, "thinking", "needs a thinking choice: mode 'none', 'toggle' or 'levels'")
     mode = thinking.get("mode") if isinstance(thinking, Mapping) else None
     if mode not in THINKING_FIELDS:
         _refuse(kind, label, "thinking", "must be an object whose 'mode' is 'none', 'toggle' or 'levels'")

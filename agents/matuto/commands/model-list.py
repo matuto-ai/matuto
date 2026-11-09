@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -22,7 +23,7 @@ def run(argv):
         finally:
             opened.close()
         _replace(path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
-    except (OSError, UnicodeError, ValueError, store.StoreError) as error:
+    except (OSError, UnicodeError, ValueError, sqlite3.Error, store.StoreError) as error:
         print(f"matuto model-list: {error}; any previous file at {path} is unchanged", file=sys.stderr)
         return 1
     print(f"Exported {len(document['models'])} published model(s) to {path}.")
