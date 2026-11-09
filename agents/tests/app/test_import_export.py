@@ -1,5 +1,7 @@
 """Portable record documents use the validated store API and stay atomic."""
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -63,7 +65,7 @@ class ImportExportTest(unittest.TestCase):
                      "bench_generation_tokens": 1, "bench_repetitions": 1}
         self.language = {"kind": "language", "profile_id": "language-new", "name": "Language",
                         "notes": "language note", "alias": "language", "context_size": 16,
-                        "thinking": "off", "card_id": "card-new",
+                        "thinking": {"mode": "none"}, "card_id": "card-new",
                         "arguments": [{"tool": "server", "catalogue": None,
                                        "option": "--safe"},
                                       {"tool": "smoke", "option": "--safe-smoke"},
@@ -244,6 +246,109 @@ class ImportExportTest(unittest.TestCase):
         with mock.patch.object(self.opened, "close"):
             with mock.patch("matuto.store.open_store", return_value=self.opened):
                 self.assertEqual(import_command.run([str(source)]), 1)
+
+
+class ModelListTest(unittest.TestCase):
+    """A schema-v4 store migrates, then the CLI exports only its published language models."""
+
+    LEVELS = {"mode": "levels", "levels": ["low", "high"],
+              "request": {"field": "reasoning_effort", "values": {"low": "low", "high": "high"}}}
+
+    def setUp(self):
+        ImportExportTest.setUp(self)
+        (self.models / "mmproj.gguf").write_bytes(b"projector")
+        self.opened.connection().execute(
+            "INSERT INTO acquisition_records VALUES ('acq-mmproj', 'Projector', 'adoption',"
+            " 'locally-hashed', NULL, NULL, NULL, 'loc', 'now', '', 'now')")
+        self.opened.connection().execute(
+            "INSERT INTO acquisition_files VALUES ('acq-mmproj', 'mmproj.gguf', 9, NULL, ?, 'now')",
+            ("d" * 64,))
+
+    def profile(self, identifier, alias, **fields):
+        return {**self.language, "profile_id": identifier, "name": identifier, "alias": alias,
+                "notes": "", "arguments": [], **fields}
+
+    def test_migrated_store_exports_published_language_facts_and_keeps_a_failed_write_atomic(self):
+        ImportExportTest.import_document(self, {"version": 1, "records": [
+            self.card,
+            self.profile("p-levels", "levels-model", context_size=8192, thinking=self.LEVELS,
+                         arguments=[{"tool": "server", "option": "--n-predict", "value": "2048"}]),
+            self.profile("p-vision", "vision-model", context_size=4096,
+                         mmproj={"acquisition_id": "acq-mmproj", "file_name": "mmproj.gguf"}),
+            self.profile("p-free", "free-model", context_size=1024),
+            self.profile("p-hidden", "hidden-model", context_size=512)]})
+        connection = self.opened.connection()
+        connection.execute("UPDATE model_profiles SET published = 1 WHERE profile_id <> 'p-hidden'")
+        # Rewind to schema 4, whose thinking was free text.
+        connection.execute("UPDATE model_profiles SET thinking = ' None ' WHERE profile_id = 'p-vision'")
+        connection.execute("UPDATE model_profiles SET thinking = 'think hard', notes = 'old note'"
+                           " WHERE profile_id = 'p-free'")
+        # The old install's capability object for one chat-template switch.
+        connection.execute("UPDATE model_profiles SET thinking = ? WHERE profile_id = 'p-hidden'", (json.dumps(
+            {"reasoning": True, "thinkingLevelMap": {"off": "off", "high": "high"},
+             "compat": {"thinkingFormat": "chat-template",
+                        "chatTemplateKwargs": {"enable_thinking": {"$var": "thinking.enabled"}}}}),))
+        connection.execute("UPDATE model_profiles SET thinking = 'high' WHERE profile_id = 'p-levels'")
+        connection.execute("UPDATE store_meta SET value = '4' WHERE key = 'schema_version'")
+        self.opened.close()
+
+        staged = store.stage_migrations(self.config)
+        os.replace(staged, store.store_path(self.config))
+        self.opened = store.open_store(self.config)
+        self.addCleanup(self.opened.close)
+        free = store.read_record(self.opened, "language", "p-free")
+        self.assertIsNone(free["thinking"])
+        self.assertEqual(free["notes"], "old note\nThinking before the fixed format: think hard")
+        self.assertEqual(store.read_record(self.opened, "language", "p-vision")["thinking"], {"mode": "none"})
+        self.assertEqual(store.read_record(self.opened, "language", "p-hidden")["thinking"], {
+            "mode": "toggle", "request": {"field": "chat_template_kwargs.enable_thinking",
+                                          "on": True, "off": False}})
+        # A profile needing a choice cannot be saved again until thinking is chosen.
+        with self.assertRaisesRegex(store.RecordRefusal, "thinking"):
+            store.save_record(self.opened, dict(free, notes="edited"), record_id="p-free")
+        levels = store.read_record(self.opened, "language", "p-levels")
+        self.assertIsNone(levels["thinking"])
+        levels.pop("qualification")
+        store.save_record(self.opened, dict(levels, thinking=self.LEVELS), record_id="p-levels")
+        self.assertEqual(store.read_record(self.opened, "language", "p-levels")["thinking"], self.LEVELS)
+        accepted = store.fingerprint(self.opened, store.read_record(self.opened, "language", "p-vision"))
+        self.opened.connection().executescript(f"""
+            INSERT INTO qualification_records VALUES ('q-vision', 'language', 'p-vision', 'p-vision',
+                '{accepted}', NULL, 'now');
+            INSERT INTO acceptances VALUES ('a-vision', 'q-vision', 'serving', '', 'operator', 'now', NULL);
+        """)
+
+        target = self.home / "consumer" / "models.json"
+        target.parent.mkdir()
+        output = io.StringIO()
+        with (mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config)}),
+              contextlib.redirect_stdout(output)):
+            self.assertEqual(cli.main(["matuto-manager", "model-list", str(target)]), 0)
+        text = target.read_text(encoding="utf-8")
+        document = json.loads(text)
+        self.assertEqual(set(document), {"format", "version", "exported_at", "models"})
+        self.assertEqual((document["format"], document["version"]), ("matuto-model-list", 1))
+        self.assertEqual(document["models"], [
+            {"id": "free-model", "qualified": False, "context_tokens": 1024, "max_output_tokens": 1024,
+             "input": ["text"], "thinking": {"mode": "unknown"}},
+            {"id": "levels-model", "qualified": False, "context_tokens": 8192, "max_output_tokens": 2048,
+             "input": ["text"], "thinking": self.LEVELS},
+            {"id": "vision-model", "qualified": True, "context_tokens": 4096, "max_output_tokens": 4096,
+             "input": ["text", "image"], "thinking": {"mode": "none"}}])
+        self.assertIn("free-model", output.getvalue())
+        self.assertNotIn("levels-model", output.getvalue().split("\n", 1)[1])
+        # The exact documents above carry no key, port or consumer term; no host path or address either.
+        for private in (str(self.home), "127.0.0.1", "localhost"):
+            self.assertNotIn(private, text)
+
+        errors = io.StringIO()
+        with (mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config)}),
+              mock.patch("os.replace", side_effect=OSError("disk full")),
+              contextlib.redirect_stderr(errors)):
+            self.assertEqual(cli.main(["matuto-manager", "model-list", str(target)]), 1)
+        self.assertEqual(target.read_text(encoding="utf-8"), text)
+        self.assertEqual(sorted(path.name for path in target.parent.iterdir()), ["models.json"])
+        self.assertIn("disk full", errors.getvalue())
 
 
 if __name__ == "__main__":

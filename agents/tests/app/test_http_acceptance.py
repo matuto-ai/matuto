@@ -413,7 +413,7 @@ Path(os.path.join(os.environ["FAKE_UNIT_DIR"], unit)).write_text("inactive")
                 profile_record = {
                     "kind": "language", "profile_id": "prof-coder",
                     "name": "Qwen3.6 Coder 192K", "alias": "qwen3-coder",
-                    "context_size": 131072, "thinking": "high", "card_id": "journey-card",
+                    "context_size": 131072, "thinking": {"mode": "none"}, "card_id": "journey-card",
                     "notes": "fixture-backed joined journey",
                     "model": {"acquisition_id": adopted["acquisition_id"], "file_name": model_name},
                     "mmproj": None, "mtp": None, "arguments": [],

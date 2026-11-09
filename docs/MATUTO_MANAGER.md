@@ -26,6 +26,40 @@ The app has seven pages: **Overview**, **Model files**, **Profiles**, **Runs & j
 
 **Model console** is available only while healthy agentic serving is running. It is unavailable during voice serving or when the manager cannot confirm healthy serving. The console's native download and delete controls are disabled; use Model files to get model files and external file management to delete them. Console requests and consumer requests share the serving model slot.
 
+### Thinking in a language profile
+
+Each language profile states how a consumer requests thinking, in one of three modes. **None** means the model has no thinking control. **On / off** names the request-body field a consumer sets and the values for on and off, such as `chat_template_kwargs.enable_thinking` with `true` and `false`. **Levels** names the field and the value sent for each level, such as `reasoning_effort` with `low = low` and `high = high`. Nested fields use dots. Values are JSON when they parse (`true`, `8192`, `"high"`); other text is sent as a string. Import documents carry the same shape, for example `{"mode": "toggle", "request": {"field": "chat_template_kwargs.enable_thinking", "on": true, "off": false}}`.
+
+The update that introduced this format converts older free-text thinking. `none`, and the old install's single chat-template switch, convert directly. Any other value is moved into the profile's notes, and the profile is labelled **Needs a thinking choice** until you choose a mode in the form; it cannot be saved or duplicated before then. Because thinking is part of the served configuration, qualified profiles and the bundles using them read as changed since qualification after this update, so requalify them before relying on that label.
+
+### Export the model list for consumers
+
+Matuto publishes facts a consumer needs to configure itself, but never writes consumer configuration. Export the list with **Export model list** in Profiles › Import / export, which downloads `matuto-model-list.json`, or from a terminal with `matuto-manager model-list <file.json>`. Copy the file to each consumer yourself. Export again after publishing, unpublishing or editing a published profile; the file does not update itself.
+
+The export reads only the store. It works while serving is stopped, never starts serving, loads a model or changes publication, and does not block serving. The terminal command writes beside the target and renames over it, so a failed export prints the reason and leaves any previous file unchanged. It names every published profile whose thinking is exported as `unknown`.
+
+The file is format `matuto-model-list`, version 1:
+
+```json
+{
+  "format": "matuto-model-list",
+  "version": 1,
+  "exported_at": "2026-11-09T12:00:00Z",
+  "models": [
+    {
+      "id": "qwen3-8b",
+      "qualified": false,
+      "context_tokens": 32768,
+      "max_output_tokens": 8192,
+      "input": ["text", "image"],
+      "thinking": {"mode": "toggle", "request": {"field": "chat_template_kwargs.enable_thinking", "on": true, "off": false}}
+    }
+  ]
+}
+```
+
+`models` lists exactly the published language profiles. `id` is the published alias consumers send to the router. `qualified` is the profile's current qualification. `context_tokens` is its context size, and `max_output_tokens` is the served `n-predict`, which is the context size unless a server argument sets it. `input` includes `image` only when the profile has an mmproj file. `thinking` is the profile's thinking in the form above, or `{"mode": "unknown"}` while it needs a thinking choice. The file contains no router API key, file paths, host addresses or ports; connection settings stay with each consumer.
+
 ## Recover or repair Matuto
 
 Bootstrap installs all three app-menu entries: **Matuto**, **Repair Matuto** and **Update Matuto**, each running the installed updater outside the versioned release folders. **Update Matuto** remains available when no newer release is offered; it opens Settings › Maintenance's update screen.

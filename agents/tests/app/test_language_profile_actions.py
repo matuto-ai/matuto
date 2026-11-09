@@ -77,7 +77,7 @@ class LanguageProfileActionsHttpTest(unittest.TestCase):
     def language(self, profile_id, alias=None):
         return {"kind": "language", "profile_id": profile_id, "name": f"Profile {profile_id}",
                 "alias": alias or f"alias-{profile_id}", "context_size": 4096,
-                "thinking": "off", "card_id": "card-a", "notes": "original notes",
+                "thinking": {"mode": "none"}, "card_id": "card-a", "notes": "original notes",
                 "model": {"acquisition_id": "acq-a", "file_name": "model.gguf"},
                 "mmproj": None, "mtp": None, "arguments": []}
 

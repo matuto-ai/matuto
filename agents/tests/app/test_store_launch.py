@@ -89,7 +89,7 @@ class LaunchSpecTest(unittest.TestCase):
             self.connection.execute(
                 "INSERT INTO model_profiles (profile_id,kind,name,alias,context_size,thinking,"
                 "card_id,speech_executable_id,published,notes,created_at)"
-                " VALUES (?,?,?, ?,4096,'high',?,?,0,'',?)",
+                " VALUES (?,?,?, ?,4096,'{\"mode\":\"none\"}',?,?,0,'',?)",
                 (identifier, kind, identifier, "fixture" if kind == "language" else "",
                  card, exec_id, NOW))
             self.connection.execute(
@@ -193,7 +193,7 @@ class LaunchSpecTest(unittest.TestCase):
         self.connection.execute(
             "INSERT INTO model_profiles (profile_id,kind,name,alias,context_size,thinking,"
             "card_id,published,notes,created_at) VALUES ('lang-2','language','Second profile',"
-            "'second',4096,'high','card-2',0,'',?)", (NOW,))
+            "'second',4096,'{\"mode\":\"none\"}','card-2',0,'',?)", (NOW,))
 
         class EmptyRunner:
             store = self.opened

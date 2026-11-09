@@ -55,7 +55,7 @@ class Element {
 async function main() {
     const ids = ['languageProfiles','languageProfileForm','languageProfileList','newLanguageProfile',
         'profileUnavailable','profileError','profileSuccess','profileId','profileName','profileAlias',
-        'profileContext','profileThinking','modelPick','mmprojPick','mtpPick','cardPick','profileNotes',
+        'profileContext','thinkingMode','thinkingField','thinkingOn','thinkingOff','thinkingLevels','modelPick','mmprojPick','mtpPick','cardPick','profileNotes',
         'languageProfileFormTitle','languageProfileSave','languageProfileCancel'];
     const elements = Object.fromEntries(ids.map(id => [id, new Element(id.endsWith('Pick') ? 'select' : 'div')]));
     const root = elements.languageProfiles;
@@ -70,7 +70,11 @@ async function main() {
         if (list) return rowGroups[list[1]];
         return null;
     };
+    const thinkingLabels = ['toggle levels', 'toggle', 'toggle', 'levels'].map(modes => {
+        const label = new Element('label'); label.dataset = {thinking: modes}; return label;
+    });
     root.querySelectorAll = selector => {
+        if (selector === '[data-thinking]') return thinkingLabels;
         const match = /^\[data-argument-rows="(server|smoke|bench)"\] \.argument-row$/.exec(selector);
         return match ? rowGroups[match[1]].children : [];
     };
@@ -111,14 +115,15 @@ async function main() {
         {profile_id:'qualified',name:'Qualified profile',alias:'qualified',published:true,qualification:{state:'qualified'},available:true,
             remove_reason:'Published profile; unpublish before removing.',unpublish_reason:''},
         {profile_id:'changed',name:'Changed profile',alias:'changed',published:false,qualification:{state:'candidate',changed_since_qualification:true},available:true,
-            remove_reason:'',unpublish_reason:''},
+            remove_reason:'',unpublish_reason:'',thinking_needed:true},
         {profile_id:'unavailable',name:'Unavailable profile',alias:'missing',published:false,qualification:{state:'candidate'},available:false,
             reason:'model file is missing',remove_reason:'',unpublish_reason:''},
     ];
     const picks = [{name:'Fixture model',file_name:'model.gguf',pick:{acquisition_id:'a',file_name:'model.gguf'}}];
     let postBody, popup;
     let editRecord = {kind:'language',profile_id:'qualified',name:'Qualified profile',alias:'qualified',context_size:4096,
-        thinking:'off',card_id:'card-a',notes:'stored notes',model:picks[0].pick,arguments:[]};
+        thinking:{request:{off:false,on:true,field:'chat_template_kwargs.enable_thinking'},mode:'toggle'},
+        card_id:'card-a',notes:'stored notes',model:picks[0].pick,arguments:[]};
     const editCalls = [];
     let editReads = 0;
     let failEditSave = false, editWarnings = [], previewKind = 'served-change';
@@ -191,6 +196,8 @@ async function main() {
     assert.match(elements.languageProfileList.textContent, /Qualified/);
     assert.match(elements.languageProfileList.textContent, /Candidate — changed since qualification/);
     assert.match(elements.languageProfileList.textContent, /Unavailable: model file is missing/);
+    assert.match(profileRow('changed').textContent, /Needs a thinking choice/);
+    assert.doesNotMatch(profileRow('qualified').textContent, /Needs a thinking choice/);
 
     await elements.newLanguageProfile.fire('click');
     await addButtons.server.fire('click');
@@ -205,10 +212,16 @@ async function main() {
     assert.equal(elements.languageProfileForm.hidden, false);
     elements.profileId.value = 'profile-input'; elements.profileName.value = 'Input stays';
     elements.profileAlias.value = 'input-stays'; elements.profileContext.value = '4096';
-    elements.profileThinking.value = 'off'; elements.cardPick.value = 'card-a';
+    elements.thinkingMode.value = 'levels'; await elements.thinkingMode.fire('change');
+    assert.deepEqual(JSON.parse(JSON.stringify(thinkingLabels.map(label => label.hidden))), [false, true, true, false]);
+    elements.thinkingField.value = 'reasoning_effort';
+    elements.thinkingLevels.value = 'low = low\nhigh = "high"\n\nmedium\nbudget = 8192';
+    elements.cardPick.value = 'card-a';
     elements.modelPick.value = JSON.stringify(picks[0].pick);
     await elements.languageProfileForm.fire('submit', {preventDefault() {}});
     assert.equal(postBody.name, 'Input stays');
+    assert.deepEqual(JSON.parse(JSON.stringify(postBody.thinking)), {mode:'levels', levels:['low', 'high', 'medium', 'budget'],
+        request:{field:'reasoning_effort', values:{low:'low', high:'high', medium:'medium', budget:8192}}});
     assert.equal(JSON.stringify(postBody.arguments), JSON.stringify([
         {tool:'server',option:'--custom-flag',value:"one value with 'quotes'"}]));
     assert.equal(elements.profileName.value, 'Input stays');
@@ -264,7 +277,13 @@ async function main() {
     assert.equal(elements.profileName.value, 'Qualified profile');
     assert.equal(elements.profileNotes.value, 'stored notes');
     assert.equal(elements.languageProfileFormTitle.textContent, 'Edit Qualified profile');
-    assert.equal(elements.languageProfileSave.textContent, 'Save profile');
+    assert.equal(elements.languageProfileSave.textContent, 'Save profile',
+        'stored thinking in another key order is not a served change');
+    assert.equal(elements.thinkingMode.value, 'toggle');
+    assert.equal(elements.thinkingField.value, 'chat_template_kwargs.enable_thinking');
+    assert.equal(elements.thinkingOn.value, 'true');
+    assert.equal(elements.thinkingOff.value, 'false');
+    assert.deepEqual(JSON.parse(JSON.stringify(thinkingLabels.map(label => label.hidden))), [false, false, false, true]);
     elements.profileContext.value = '8192';
     await elements.languageProfileForm.fire('input');
     assert.equal(elements.languageProfileSave.textContent, 'Review…');

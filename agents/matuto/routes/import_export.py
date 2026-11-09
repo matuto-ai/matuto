@@ -46,6 +46,10 @@ def _get(request):
     try:
         opened = store.open_store()
         connection = opened.connection()
+        if request.query.get("model_list") == ["1"]:
+            document = store.model_list(opened)
+            return 200, json.dumps(document, ensure_ascii=False, indent=2), "application/json", {
+                "Content-Disposition": 'attachment; filename="matuto-model-list.json"'}
         selected = request.query.get("record", [])
         if request.query.get("download") == ["1"]:
             records = None

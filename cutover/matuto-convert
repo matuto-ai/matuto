@@ -478,6 +478,11 @@ def language_record(path, values, notes, report, options, resolver):
         report.add(source, "THINKING_CAPABILITIES", "the profile states none, so the old "
                   "install's own reasoning default is carried because a language profile's "
                   "thinking is required; change it if the operator wants another")
+    stated, thinking = thinking, store.legacy_thinking(thinking)
+    if thinking is None:
+        raise Refusal(f"{source}: THINKING_CAPABILITIES {stated!r} does not map to thinking "
+                      "none or one chat-template switch, and no other value is guessed; "
+                      "remove it from the old profile to carry the old default")
     rows = []
     if values.get("GPU_LAYERS"):
         rows.append({"tool": "server", "option": store.GPU_LAYER_CANONICAL,

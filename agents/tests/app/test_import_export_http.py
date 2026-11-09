@@ -63,6 +63,22 @@ class ImportExportHttpTest(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error.code, error.read(), error.headers
 
+    def test_page_model_list_matches_the_cli_file_for_the_same_store(self):
+        self.import_document(self.document)
+        self.opened.connection().execute(
+            "UPDATE model_profiles SET published = 1 WHERE profile_id = 'language-new'")
+        status, body, _headers = self.request("/")
+        self.assertIn(b'href="/api/import-export?model_list=1"', body)
+        status, body, headers = self.request("/api/import-export?model_list=1")
+        self.assertEqual(status, 200)
+        self.assertIn("matuto-model-list.json", headers["Content-Disposition"])
+        target = self.home / "models.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["matuto-manager", "model-list", str(target)]), 0)
+        page = json.loads(body)
+        self.assertEqual(page["models"], json.loads(target.read_text(encoding="utf-8"))["models"])
+        self.assertEqual([model["id"] for model in page["models"]], ["language"])
+
     def test_section_import_refusal_and_exports_share_one_http_fixture(self):
         status, body, _headers = self.request("/")
         self.assertEqual(status, 200)

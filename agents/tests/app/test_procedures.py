@@ -73,7 +73,7 @@ class ProcedureRunTest(RunnerFixture):
         self.connection.execute(
             "INSERT INTO model_profiles (profile_id,kind,name,alias,context_size,thinking,card_id,"
             "published,notes,created_at) VALUES ('lang','language','fixture profile','fixture',"
-            "4096,'high','card',0,'',?)", (NOW,))
+            "4096,'{\"mode\":\"none\"}','card',0,'',?)", (NOW,))
         self.connection.execute("INSERT INTO profile_artifacts VALUES ('lang','model','acq','model.gguf')")
         self.connection.execute("INSERT INTO profile_arguments VALUES ('lang','server',0,NULL,'--parallel','1')")
         self.connection.execute("INSERT INTO profile_arguments VALUES ('lang','smoke',0,NULL,'--custom','one value')")

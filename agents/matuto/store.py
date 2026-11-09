@@ -30,7 +30,7 @@ if __package__ in (None, ""):
 from matuto import arguments, installation, recipes
 from matuto.matuto_runtime import OPTION_ALIASES
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MIGRATIONS = {}
 STORE_FILENAME = "store.sqlite3"
 MIGRATION_TEMP_PREFIX = ".store-migration-"
@@ -450,6 +450,54 @@ def _migrate_v3_to_v4(connection):
 MIGRATIONS[3] = _migrate_v3_to_v4
 
 
+def legacy_thinking(text):
+    """The fixed thinking format for an old free-text value, or None when only a guess would do.
+
+    Two old values say exactly what to send: "none", and the old install's capability
+    object, which states no reasoning or one chat-template switch fed thinking.enabled.
+    """
+    text = (text or "").strip()
+    if text.lower() == "none":
+        return {"mode": "none"}
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("reasoning") is False:
+        return {"mode": "none"}
+    compat = value.get("compat")
+    switches = compat.get("chatTemplateKwargs") if isinstance(compat, dict) else None
+    if (isinstance(switches, dict) and value.get("reasoning") is True
+            and compat.get("thinkingFormat") == "chat-template" and len(switches) == 1
+            and list(switches.values()) == [{"$var": "thinking.enabled"}]
+            and THINKING_FIELD_PATTERN.fullmatch(next(iter(switches)))):
+        return {"mode": "toggle", "request": {
+            "field": f"chat_template_kwargs.{next(iter(switches))}", "on": True, "off": False}}
+    return None
+
+
+def _migrate_v4_to_v5(connection):
+    """Move language thinking to the fixed format; keep text it cannot map as notes.
+
+    An unmapped value becomes notes and leaves thinking NULL, which marks the
+    profile as needing a thinking choice before its next save.
+    """
+    for row in connection.execute(
+            "SELECT profile_id, thinking, notes FROM model_profiles WHERE kind = 'language'").fetchall():
+        text = (row["thinking"] or "").strip()
+        mapped, notes = legacy_thinking(text), row["notes"]
+        thinking = None if mapped is None else _thinking_column(mapped)
+        if mapped is None and text:
+            notes = "\n".join(part for part in (notes, f"Thinking before the fixed format: {text}") if part)
+        connection.execute("UPDATE model_profiles SET thinking = ?, notes = ? WHERE profile_id = ?",
+                           (thinking, notes, row["profile_id"]))
+
+
+MIGRATIONS[4] = _migrate_v4_to_v5
+
+
 REQUIRED_TABLES = frozenset(
     statement.split()[2]
     for _area, statements in SCHEMA_BLOCKS
@@ -774,6 +822,8 @@ def save_record(store, record, *, record_id=None, help_text=None, selector=None,
                 "recognition": ("name", "speech_executable_id", "published", "notes"),
             }[kind]
             values = dict(candidate, published=int(candidate.get("published", False)))
+            if kind == "language":
+                values["thinking"] = _thinking_column(candidate["thinking"])
             if existing:
                 connection.execute(
                     "UPDATE model_profiles SET " + ", ".join(f"{field} = ?" for field in fields)
@@ -905,6 +955,53 @@ def export_records(store, records=None):
     if not result:
         raise StoreError("no records selected for export")
     return {"version": DOCUMENT_VERSION, "records": result}
+
+
+MODEL_LIST_FORMAT = "matuto-model-list"
+MODEL_LIST_VERSION = 1
+
+
+def model_list(store, *, now=None):
+    """The published language profiles as consumer-neutral facts, read from the store only.
+
+    It never names a path, address, port or key: connection settings stay with each
+    consumer. A profile still needing a thinking choice is exported as "unknown".
+    """
+    models = []
+    for row in store.connection().execute(
+            "SELECT profile_id FROM model_profiles WHERE kind = 'language' AND published = 1"
+            " ORDER BY alias"):
+        record = _read_record(store, "language", row["profile_id"])
+        context = record["context_size"]
+        server_arguments, _layers = _server_arguments(record.get("arguments") or (), resolve_layers=False)
+        models.append({
+            "id": record["alias"],
+            "qualified": qualification_state(store, record)["state"] == "qualified",
+            "context_tokens": context,
+            "max_output_tokens": _served_output_tokens(record["alias"], server_arguments, context),
+            "input": ["text", "image"] if record.get("mmproj") else ["text"],
+            "thinking": record["thinking"] or {"mode": "unknown"},
+        })
+    exported = now or datetime.datetime.now(datetime.timezone.utc)
+    return {"format": MODEL_LIST_FORMAT, "version": MODEL_LIST_VERSION,
+            "exported_at": exported.strftime("%Y-%m-%dT%H:%M:%SZ"), "models": models}
+
+
+def _served_output_tokens(alias, server_arguments, context):
+    """The n-predict the router preset serves: the context unless a server argument sets it."""
+    predict = None
+    for flag, value in server_arguments:
+        option, separator, inline_value = flag.partition("=")
+        if OPTION_ALIASES.get(option, option) == "--n-predict":
+            predict = inline_value if separator and value is None else value
+    if predict is None:
+        return context
+    try:
+        tokens = int(predict)
+    except (TypeError, ValueError):
+        raise StoreError(f"published profile {alias!r} has an invalid n-predict value") from None
+    # llama.cpp reads -1 as unlimited and -2 as until the context fills; both end at the context.
+    return context if tokens < 0 else tokens
 
 
 def import_records(store, document, *, help_text=None, selector=None):
@@ -1301,6 +1398,9 @@ def _read_record(store, record_kind, record_id):
     # profile no speech executable.
     record = {field: row[field] for field in RECORD_FIELDS[record_kind] if field in row.keys()}
     record["published"] = bool(row["published"])
+    if record_kind == "language":
+        # NULL is a migrated profile that still needs a thinking choice.
+        record["thinking"] = None if row["thinking"] is None else json.loads(row["thinking"])
     # A row naming a catalogue entry is a catalogue pick, any other a Custom flag.
     record["arguments"] = []
     for argument in connection.execute(
@@ -3497,6 +3597,52 @@ def _unpublished(record, kind, label):
         _refuse(kind, label, "published", "only a language profile may be published")
 
 
+THINKING_REQUEST = {"toggle": {"field", "on", "off"}, "levels": {"field", "values"}}
+THINKING_FIELDS = {"none": {"mode"}, "toggle": {"mode", "request"},
+                   "levels": {"mode", "levels", "request"}}
+# A request-body field, with dots for nested fields such as chat_template_kwargs.enable_thinking.
+THINKING_FIELD_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def _thinking(record, kind, label):
+    thinking = record.get("thinking")
+    mode = thinking.get("mode") if isinstance(thinking, Mapping) else None
+    if mode not in THINKING_FIELDS:
+        _refuse(kind, label, "thinking", "must be an object whose 'mode' is 'none', 'toggle' or 'levels'")
+    if set(thinking) != THINKING_FIELDS[mode]:
+        _refuse(kind, label, "thinking",
+                f"must have exactly the fields {', '.join(sorted(THINKING_FIELDS[mode]))} for mode {mode!r}")
+    if mode == "none":
+        return
+    request = thinking["request"]
+    if not isinstance(request, Mapping) or set(request) != THINKING_REQUEST[mode]:
+        _refuse(kind, label, "thinking.request",
+                f"must have exactly the fields {', '.join(sorted(THINKING_REQUEST[mode]))}")
+    field = request["field"]
+    if not isinstance(field, str) or not THINKING_FIELD_PATTERN.fullmatch(field):
+        _refuse(kind, label, "thinking.request.field",
+                "must name a request-body field, with dots for nested fields")
+    if mode == "toggle":
+        values = {"thinking.request.on": request["on"], "thinking.request.off": request["off"]}
+    else:
+        levels = thinking["levels"]
+        if (not isinstance(levels, list) or not levels
+                or not all(isinstance(level, str) and level.strip() for level in levels)
+                or len(set(levels)) != len(levels)):
+            _refuse(kind, label, "thinking.levels", "must be a non-empty list of distinct level names")
+        if not isinstance(request["values"], Mapping) or set(request["values"]) != set(levels):
+            _refuse(kind, label, "thinking.request.values", "must give one value for each level")
+        values = {f"thinking.request.values.{level}": value
+                  for level, value in request["values"].items()}
+    for name, value in values.items():
+        if not isinstance(value, (str, int)):  # bool is an int
+            _refuse(kind, label, name, "must be a string, a whole number, or true/false")
+
+
+def _thinking_column(thinking):
+    return json.dumps(thinking, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _validate_card(record, detected_gpus, label):
     kind = "card"
     identity = _text(record, kind, label, "gpu_identity", required=True)
@@ -3515,7 +3661,7 @@ def _validate_language(record, connection, label, help_text, selector):
     kind = "language"
     _text(record, kind, label, "alias", required=True)
     _whole_number(record, kind, label, "context_size")
-    _text(record, kind, label, "thinking", required=True)
+    _thinking(record, kind, label)
     _card_id(record, connection, kind, label)
     _flag(record, kind, label, "published")
     _picks(record, connection, kind, label)

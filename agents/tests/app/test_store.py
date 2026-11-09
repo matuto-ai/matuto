@@ -78,7 +78,7 @@ class StoreTestCase(unittest.TestCase):
                 20000000000, 'b0651e28' || substr(hex(randomblob(28)), 1, 56),
                 'c' || substr(hex(randomblob(31)), 1, 63), '2026-10-02T00:00:00+00:00');
             INSERT INTO model_profiles VALUES ('prof-coder', 'language', 'Qwen3.6 Coder 192K',
-                'qwen3-coder', 131072, 'high', 'card-r9', NULL, 0, 'tuned for the router',
+                'qwen3-coder', 131072, '{\"mode\":\"none\"}', 'card-r9', NULL, 0, 'tuned for the router',
                 '2026-10-03T00:00:00+00:00');
             INSERT INTO model_profiles VALUES ('prof-breeze', 'synthesis', 'Breeze on the R9',
                 '', NULL, NULL, 'card-r9', 'exe-breeze', 0, 'voice', '2026-10-03T00:00:00+00:00');
@@ -257,7 +257,7 @@ class ReferenceEnforcementTest(StoreTestCase):
         # A published profile nothing refers to, so the refusal cannot be a
         # foreign key doing the work.
         connection.execute("INSERT INTO model_profiles VALUES ('prof-published', 'language',"
-                           " 'Published 96K', 'published-96k', 98304, 'off', 'card-r9', NULL, 1, '',"
+                           " 'Published 96K', 'published-96k', 98304, '{\"mode\":\"none\"}', 'card-r9', NULL, 1, '',"
                            " '2026-10-09T00:00:00+00:00')")
 
         with self.assertRaises(sqlite3.IntegrityError):
@@ -822,9 +822,9 @@ class ServedConfigurationTest(StoreTestCase):
             INSERT INTO acquisition_files VALUES ('acq-speech', 'weights.bin', 10, NULL,
                 '{WEIGHTS_SHA256}', NULL);
             INSERT INTO model_profiles VALUES ('prof-lang', 'language', 'Qwen 192K', 'qwen',
-                131072, 'high', 'card-r9', NULL, 1, 'notes', '2026-10-03T00:00:00+00:00');
+                131072, '{{"mode":"none"}}', 'card-r9', NULL, 1, 'notes', '2026-10-03T00:00:00+00:00');
             INSERT INTO model_profiles VALUES ('prof-lang-default', 'language', 'Qwen default',
-                'qwen-default', 131072, 'high', 'card-r9', NULL, 0, '',
+                'qwen-default', 131072, '{{"mode":"none"}}', 'card-r9', NULL, 0, '',
                 '2026-10-03T00:00:00+00:00');
             INSERT INTO model_profiles VALUES ('prof-synth', 'synthesis', 'Breeze', '', NULL, NULL,
                 'card-r9', 'exe-breeze', 0, 'n', '2026-10-03T00:00:00+00:00');
@@ -910,7 +910,7 @@ class ServedConfigurationTest(StoreTestCase):
         bundle = self.fingerprint(store, "bundle", "bundle-1")
         connection.executescript("""
             INSERT INTO model_profiles VALUES ('prof-lang-b', 'language', 'Qwen 192K', 'qwen-b',
-                131072, 'high', 'card-r9', NULL, 0, 'notes', '2026-10-03T00:00:00+00:00');
+                131072, '{\"mode\":\"none\"}', 'card-r9', NULL, 0, 'notes', '2026-10-03T00:00:00+00:00');
             INSERT INTO profile_arguments VALUES ('prof-lang-b', 'server', 1, NULL,
                 '--n-gpu-layers', '60');
             INSERT INTO profile_arguments VALUES ('prof-lang-b', 'server', 0, NULL, '--parallel', '1');
@@ -931,7 +931,7 @@ class ServedConfigurationTest(StoreTestCase):
         store, _connection = self.serve()
         given = {
             "kind": "language", "profile_id": "a-temporary-copy", "context_size": 131072,
-            "thinking": "high", "card_id": "card-r9",
+            "thinking": {"mode": "none"}, "card_id": "card-r9",
             "arguments": [{"tool": "server", "option": "--parallel", "value": "1"},
                           {"tool": "server", "option": "--n-gpu-layers", "value": "60"}],
             "model": {"acquisition_id": "acq-qwen", "file_name": "model.gguf"},
@@ -1248,7 +1248,7 @@ class ServedConfigurationTest(StoreTestCase):
 
         for label, changed in (
                 ("context", dict(record, context_size=98304)),
-                ("thinking", dict(record, thinking="off")),
+                ("thinking", dict(record, thinking={"mode": "levels", "levels": ["high"], "request": {"field": "reasoning_effort", "values": {"high": "high"}}})),
                 ("server arguments", self.with_arguments(record, arguments(("--parallel", "8"),
                                                                             ("--n-gpu-layers", "60")))),
                 ("gpu layers", self.with_arguments(record, arguments(("--parallel", "1"),

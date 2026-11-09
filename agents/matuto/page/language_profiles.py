@@ -34,6 +34,43 @@ document.addEventListener('DOMContentLoaded', () => {
     $('languageProfileSave').textContent = 'Create profile';
     for (const tool of ['server', 'smoke', 'bench'])
       root.querySelector(`[data-argument-rows="${tool}"]`).textContent = '';
+    showThinkingMode();
+  }
+  // A thinking value is JSON when it parses (true, 8192, "high"); other text is sent as a string.
+  function requestValue(text) { try { return JSON.parse(text); } catch { return text; } }
+  function shownValue(value) {
+    return typeof value === 'string' && requestValue(value) === value ? value : JSON.stringify(value);
+  }
+  function showThinkingMode() {
+    const mode = $('thinkingMode').value;
+    for (const node of root.querySelectorAll('[data-thinking]'))
+      node.hidden = !node.dataset.thinking.split(' ').includes(mode);
+  }
+  function loadThinking(thinking) {
+    const mode = thinking?.mode || '';
+    $('thinkingMode').value = mode;
+    $('thinkingField').value = thinking?.request?.field || '';
+    $('thinkingOn').value = mode === 'toggle' ? shownValue(thinking.request.on) : '';
+    $('thinkingOff').value = mode === 'toggle' ? shownValue(thinking.request.off) : '';
+    $('thinkingLevels').value = mode === 'levels' ? thinking.levels.map(level =>
+      `${level} = ${shownValue(thinking.request.values[level])}`).join('\n') : '';
+    showThinkingMode();
+  }
+  function thinkingPayload() {
+    const mode = $('thinkingMode').value, field = $('thinkingField').value.trim();
+    if (!mode) return null;
+    if (mode === 'none') return {mode};
+    if (mode === 'toggle') return {mode, request: {field,
+      on: requestValue($('thinkingOn').value.trim()), off: requestValue($('thinkingOff').value.trim())}};
+    const levels = [], values = {};
+    for (const line of $('thinkingLevels').value.split('\n')) {
+      if (!line.trim()) continue;
+      const at = line.indexOf('=');
+      const level = (at < 0 ? line : line.slice(0, at)).trim();
+      levels.push(level);
+      values[level] = at < 0 ? level : requestValue(line.slice(at + 1).trim());
+    }
+    return {mode, levels, request: {field, values}};
   }
 
   window.addEventListener('language-profile-actions-changed', async () => {
@@ -67,7 +104,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const labels = document.createElement('ul'); labels.setAttribute('aria-label', `${record.name} status`);
       const status = record.qualification.state === 'qualified' ? 'Qualified' :
         record.qualification.changed_since_qualification ? 'Candidate — changed since qualification' : 'Candidate';
-      for (const label of [status, record.published ? 'Published' : 'Not published']) {
+      for (const label of [status, record.published ? 'Published' : 'Not published',
+        ...(record.thinking_needed ? ['Needs a thinking choice'] : [])]) {
         const entry = document.createElement('li'); entry.textContent = label; labels.append(entry);
       }
       const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Edit';
@@ -165,7 +203,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('profileName').value = record.name;
     $('profileAlias').value = record.alias;
     $('profileContext').value = record.context_size;
-    $('profileThinking').value = record.thinking;
+    loadThinking(record.thinking);
     $('cardPick').value = record.card_id;
     $('profileNotes').value = record.notes || '';
     for (const field of ['model', 'mmproj', 'mtp'])
@@ -197,9 +235,11 @@ document.addEventListener('DOMContentLoaded', () => {
       typeof value === 'object' ? JSON.stringify(value) : String(value);
   }
   function servedChanged(record) {
+    const sorted = (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value;
     const served = value => JSON.stringify({context_size:value.context_size, thinking:value.thinking,
       card_id:value.card_id, model:value.model ?? null, mmproj:value.mmproj ?? null, mtp:value.mtp ?? null,
-      arguments:value.arguments.filter(row => row.tool === 'server')});
+      arguments:value.arguments.filter(row => row.tool === 'server')}, sorted);
     return served(record) !== served(editing);
   }
   function updateSaveLabel() {
@@ -209,7 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function payload() {
     const record = {kind: 'language', profile_id: $('profileId').value,
       name: $('profileName').value, alias: $('profileAlias').value,
-      context_size: Number($('profileContext').value), thinking: $('profileThinking').value,
+      context_size: Number($('profileContext').value), thinking: thinkingPayload(),
       card_id: $('cardPick').value, notes: $('profileNotes').value,
       model: JSON.parse($('modelPick').value || 'null'),
       mmproj: JSON.parse($('mmprojPick').value || 'null'),
@@ -243,6 +283,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }});
   form.addEventListener('input', updateSaveLabel);
   form.addEventListener('change', updateSaveLabel);
+  $('thinkingMode').addEventListener('change', showThinkingMode);
   $('languageProfileCancel').addEventListener('click', clearForm);
   form.addEventListener('submit', async event => {
     event.preventDefault(); error.textContent = ''; success.textContent = '';
@@ -345,7 +386,14 @@ def html(_status):
 <label>Name <input id="profileName" required></label>
 <label>Alias <input id="profileAlias" required></label>
 <label>Context <input id="profileContext" type="number" min="1" required></label>
-<label>Thinking <input id="profileThinking" required></label>
+<fieldset><legend>Thinking</legend>
+<label>Mode <select id="thinkingMode" required><option value="">Choose a thinking mode</option><option value="none">None</option><option value="toggle">On / off</option><option value="levels">Levels</option></select></label>
+<label data-thinking="toggle levels" hidden>Request field <input id="thinkingField"></label>
+<label data-thinking="toggle" hidden>Value when on <input id="thinkingOn"></label>
+<label data-thinking="toggle" hidden>Value when off <input id="thinkingOff"></label>
+<label data-thinking="levels" hidden>Levels, one per line as level = value <textarea id="thinkingLevels"></textarea></label>
+<p>The request field is the request-body field a consumer sets, with dots for nested fields, such as chat_template_kwargs.enable_thinking. A value is JSON when it parses (true, 8192, "high"); other text is sent as a string.</p>
+</fieldset>
 <label>Model file <select id="modelPick" required></select></label>
 <label>mmproj <select id="mmprojPick"></select></label>
 <label>MTP <select id="mtpPick"></select></label>
